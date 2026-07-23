@@ -32,6 +32,28 @@ OTHER_USER = 2002
 TOKEN = "123456:TEST-TOKEN-NOT-REAL"
 
 
+@pytest.mark.parametrize(
+    ("api_base", "expected"),
+    [
+        (
+            "https://api.telegram.org",
+            f"https://api.telegram.org/bot{TOKEN}/getUpdates",
+        ),
+        (
+            "https://telegram-proxy.test/api/",
+            f"https://telegram-proxy.test/api/bot{TOKEN}/getUpdates",
+        ),
+    ],
+)
+def test_api_url_keeps_base_when_bot_token_contains_colon(
+    api_base: str,
+    expected: str,
+) -> None:
+    client = TelegramClient(TOKEN, api_base=api_base)
+
+    assert client._url("getUpdates") == expected
+
+
 @pytest.fixture
 def git_worktree(tmp_path: Path) -> tuple[Path, str]:
     import subprocess

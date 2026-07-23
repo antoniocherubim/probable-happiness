@@ -7,7 +7,6 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Protocol
-from urllib.parse import urljoin
 
 
 class TelegramError(RuntimeError):
@@ -76,7 +75,9 @@ class TelegramClient:
 
     def _url(self, method: str) -> str:
         # Token is only used in URL path for Bot API; never logged by callers.
-        return urljoin(f"{self._api_base}/", f"bot{self._token}/{method}")
+        # Do not use urljoin here: the colon in a regular Telegram bot token
+        # makes ``bot123456:secret/...`` look like an absolute URL scheme.
+        return f"{self._api_base}/bot{self._token}/{method}"
 
     def call(self, method: str, payload: dict[str, Any] | None = None, *, timeout: float | None = None) -> Any:
         body = json.dumps(payload or {}).encode("utf-8")
