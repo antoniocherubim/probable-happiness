@@ -4,12 +4,15 @@ Runner externo para executar uma task com Cursor Agent, revisar o resultado com
 Codex e exigir aprovação humana auditável pelo Telegram.
 
 Projetos consumidores podem declarar bootstrap, ambiente allowlisted, timeouts,
-heartbeat, validações e instruções em `.agent-loop/project.toml`. Runs interrompidos
+heartbeat, validações, documentação obrigatória e entrega opt-in em branch em
+`.agent-loop/project.toml`. Runs interrompidos
 podem ser retomados sem descartar o worktree, e evidência complementar permanece
 não confiável até nova revisão. Veja [Perfil e retomada segura](docs/PROJECT_PROFILE.md).
 
-O runner não faz commit, push, merge, deploy, limpeza destrutiva nem inicia a
-próxima task.
+Por padrão o runner não faz commit nem push. Quando o projeto habilita
+explicitamente `delivery.mode = "push_branch"`, ele cria um único commit do
+snapshot aprovado e envia somente a branch congelada. Nunca faz merge, push em
+`main`/`master`, force-push, tag, PR, deploy, limpeza destrutiva ou próxima task.
 
 ## Preparação
 
@@ -53,8 +56,10 @@ Configure token e IDs numéricos fora do Git conforme
 ./agent-loop serve
 ```
 
-Uma única ponte descobre runs de múltiplos projetos no state root. Depois de
-`HUMAN_APPROVED`, valide decisão e snapshot imediatamente antes da integração:
+Uma única ponte descobre runs de múltiplos projetos no state root. O Telegram
+envia o resumo técnico em partes numeradas; somente a última contém os botões
+**Aprovar e publicar branch** e **Rejeitar**. Depois de `HUMAN_APPROVED`,
+projetos sem entrega automática podem validar decisão e snapshot manualmente:
 
 ```bash
 ./agent-loop verify --run-dir /caminho/externo/para/o/run
@@ -62,6 +67,15 @@ Uma única ponte descobre runs de múltiplos projetos no state root. Depois de
 
 O comando falha se não houver decisão humana válida ou se o worktree divergir
 do hash revisado.
+
+Com entrega habilitada, a aprovação transiciona por `DELIVERING` até `PUSHED`.
+Uma falha preserva aprovação, worktree e commit local em `DELIVERY_FAILED`:
+
+```bash
+./agent-loop resume --run-dir /caminho/externo/para/o/run
+```
+
+A retomada repete somente a entrega; Cursor e Codex não executam novamente.
 
 ## systemd --user
 

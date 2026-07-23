@@ -156,6 +156,7 @@ class FakeTelegramAPI:
     answered_callbacks: list[dict[str, Any]] = field(default_factory=list)
     fail_methods: set[str] = field(default_factory=set)
     timeout_methods: set[str] = field(default_factory=set)
+    fail_send_after: int | None = None
     next_update_id: int = 1
 
     def as_transport(self) -> HttpTransport:
@@ -197,6 +198,14 @@ class FakeTelegramAPI:
                         body=json.dumps({"ok": True, "result": batch}).encode(),
                     )
                 if api_method == "sendMessage":
+                    if (
+                        api.fail_send_after is not None
+                        and len(api.sent_messages) >= api.fail_send_after
+                    ):
+                        return FakeHttpResponse(
+                            status=502,
+                            body=json.dumps({"ok": False, "description": "upstream"}).encode(),
+                        )
                     api.sent_messages.append(payload)
                     msg = {"message_id": len(api.sent_messages), "chat": {"id": payload["chat_id"]}, "text": payload["text"]}
                     return FakeHttpResponse(

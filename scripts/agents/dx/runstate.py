@@ -135,9 +135,19 @@ def plan_resume(run_dir: Path, *, review_only: bool = False) -> dict[str, Any]:
     if iteration < 1 or iteration > int(metadata["max_iterations"]):
         raise RunStateError("invalid iteration in run")
 
-    if status == "HUMAN_APPROVED":
+    delivery = metadata.get("delivery")
+    delivery_enabled = (
+        isinstance(delivery, dict)
+        and delivery.get("mode") == "push_branch"
+        and delivery.get("push_after_human_approval") is True
+    )
+
+    if status == "PUSHED":
         validate_decision_matches_request(run_dir)
         phase = "complete"
+    elif status in {"HUMAN_APPROVED", "DELIVERING", "DELIVERY_FAILED"}:
+        validate_decision_matches_request(run_dir)
+        phase = "delivery" if delivery_enabled else "complete"
     elif status == "AWAITING_HUMAN_APPROVAL":
         request = read_json(run_dir / "human_approval_request.json")
         if compute_diff_hash(worktree, base) != request.get("diff_hash"):

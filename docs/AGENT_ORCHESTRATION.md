@@ -11,11 +11,13 @@ task versionada
   → APPROVED técnico
   → AWAITING_HUMAN_APPROVAL
   → HUMAN_APPROVED para o hash revisado
-  → verificação obrigatória do snapshot antes de integrar
+  → sem delivery: verificação manual antes de integrar
+  → com delivery: DELIVERING → PUSHED em branch da task
 ```
 
-Não há automação de decisão de produto, criação de task, commit, merge, push,
-deploy, limpeza ou próxima task.
+Não há automação de decisão de produto, criação de task, merge, push na base,
+force-push, tag, PR, deploy, limpeza ou próxima task. Commit e push de branch
+ocorrem somente no modo opt-in descrito no perfil.
 
 ## Pré-requisitos
 
@@ -107,6 +109,37 @@ A ponte usa long polling, não abre porta pública e não aceita comandos de she
 Somente o `user_id` e `chat_id` numéricos allowlisted podem aprovar. Falha de
 rede nunca promove estado. Uma única ponte varre os runs de todos os projetos.
 
+Ao abrir o gate, o Telegram recebe ID/título, repositório, base, iteração, hash,
+arquivos, estatísticas, executor, testes/validações, reviewer, findings, riscos
+e documentação — nunca o diff completo. Texto não usa `parse_mode`, URLs e
+atribuições sensíveis são redigidas e campos grandes são truncados
+explicitamente. Mensagens longas são numeradas; apenas a última tem botões.
+Cada `message_id` é persistido imediatamente para não reenviar partes concluídas.
+
+```text
+(1/1)
+CP-00 — Proibir falso sucesso do adapter Noop
+
+Resultado técnico: APPROVED
+Iteração: 2/3
+Arquivos: 9
+Diff: +288 / -15
+Testes: 47 passed, 1 skipped, 0 failed, 0 errors
+Hash revisado: 752aef57…
+
+Resumo do reviewer:
+Runtime falha antes do claim quando não existe adapter real.
+
+Findings:
+- nenhum
+
+Documentação:
+- docs/env-variables.md
+- ROADMAP.md
+
+[Aprovar e publicar branch] [Rejeitar]
+```
+
 ## systemd --user
 
 ```bash
@@ -131,11 +164,32 @@ liberação de escrita somente para o state root.
 - `APPROVED`: aceite técnico, nunca humano;
 - `AWAITING_HUMAN_APPROVAL`: botão pendente;
 - `HUMAN_APPROVED`: decisão autenticada para o hash revisado;
+- `DELIVERING`: manifesto validado e entrega em andamento;
+- `DELIVERY_FAILED`: aprovação preservada; `resume` repete somente a entrega;
+- `PUSHED`: commit e OID remoto confirmados; terminal com delivery;
 - `BLOCKED`: falha, interrupção, dependência externa ou limite atingido.
 
 Interrupções `INT`, `TERM` e `HUP` marcam runs ativos como `BLOCKED`, enviam
 notificação best-effort e preservam o worktree. O outbox usa identificador por
 mensagem para não consumir uma notificação substituída durante envio.
+
+```text
+APPROVED → AWAITING_HUMAN_APPROVAL
+                    ├─ Rejeitar → BLOCKED
+                    └─ Aprovar  → HUMAN_APPROVED
+                                      ├─ delivery=none → terminal
+                                      └─ push_branch → DELIVERING
+                                                          ├─ sucesso → PUSHED
+                                                          └─ falha → DELIVERY_FAILED
+                                                                       └─ resume → DELIVERING
+```
+
+O commit nasce de uma index temporária baseada no commit-base e no manifesto
+exato, nunca de `git add -A`. FIFO/socket/device são recusados; artefatos
+operacionais precisam estar ignorados. O push usa refspec explícito e confirma
+o OID remoto. Para remotes GitHub reconhecidos, a mensagem final inclui links
+sanitizados de branch e comparação; em outros providers mostra apenas remote e
+branch. Falha dessa notificação não desfaz um push confirmado.
 
 ## Perfil, ambiente e retomada
 

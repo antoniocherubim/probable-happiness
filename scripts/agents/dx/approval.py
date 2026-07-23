@@ -25,6 +25,9 @@ STATUS_APPROVED = "APPROVED"
 STATUS_AWAITING = "AWAITING_HUMAN_APPROVAL"
 STATUS_HUMAN_APPROVED = "HUMAN_APPROVED"
 STATUS_BLOCKED = "BLOCKED"
+STATUS_DELIVERING = "DELIVERING"
+STATUS_PUSHED = "PUSHED"
+STATUS_DELIVERY_FAILED = "DELIVERY_FAILED"
 
 REQUEST_FILENAME = "human_approval_request.json"
 DECISION_FILENAME = "human_approval_decision.json"
@@ -219,7 +222,10 @@ def create_approval_request(
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     worktree_path = Path(worktree)
-    resolved_hash = diff_hash or compute_diff_hash(worktree_path, base_commit)
+    current_hash = compute_diff_hash(worktree_path, base_commit)
+    if diff_hash is not None and diff_hash != current_hash:
+        raise ApprovalError("live worktree no longer matches the reviewed diff_hash")
+    resolved_hash = diff_hash or current_hash
     if len(resolved_hash) < 32:
         raise ApprovalError("diff_hash looks too short")
 
@@ -327,6 +333,7 @@ def enqueue_notification(
     kind: str,
     summary: str,
     report_hint: str = "",
+    messages: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """
     Write a best-effort outbox entry for the Telegram bridge.
@@ -340,7 +347,7 @@ def enqueue_notification(
     ``BLOCKED``).
     """
     run_dir = Path(run_dir)
-    if kind not in {"awaiting_human_approval", "blocked", "failure"}:
+    if kind not in {"awaiting_human_approval", "blocked", "failure", "pushed", "delivery_failed"}:
         raise ApprovalError(f"unsupported notify kind: {kind}")
 
     if kind == "awaiting_human_approval":
@@ -362,6 +369,8 @@ def enqueue_notification(
                 "callback_token": request["callback_token"],
                 "diff_hash": request["diff_hash"],
                 "task_id": request.get("task_id", ""),
+                "messages": messages or [truncate_message(summary)],
+                "sent_message_ids": [],
             }
             atomic_write_json(run_dir / NOTIFY_FILENAME, payload)
             return payload
@@ -378,6 +387,8 @@ def enqueue_notification(
             "notification_id": secrets.token_hex(8),
             "sent_at": None,
             "offer_approval_button": False,
+            "messages": messages or [truncate_message(summary)],
+            "sent_message_ids": [],
         }
         atomic_write_json(run_dir / NOTIFY_FILENAME, payload)
         return payload
@@ -488,7 +499,12 @@ def _idempotent_replay_locked(
     write), repair status while still holding the lock so bridge/waiters
     observe the repaired persisted state.
     """
-    if read_status(run_dir) != STATUS_HUMAN_APPROVED:
+    if read_status(run_dir) not in {
+        STATUS_HUMAN_APPROVED,
+        STATUS_DELIVERING,
+        STATUS_PUSHED,
+        STATUS_DELIVERY_FAILED,
+    }:
         write_status(run_dir, STATUS_HUMAN_APPROVED)
     return "idempotent_replay", existing
 
@@ -628,8 +644,13 @@ def verify_reviewed_snapshot(run_dir: Path) -> dict[str, Any]:
     """
     run_dir = Path(run_dir)
     request = load_request(run_dir)
-    if read_status(run_dir) != STATUS_HUMAN_APPROVED:
-        raise ApprovalError("run is not HUMAN_APPROVED")
+    if read_status(run_dir) not in {
+        STATUS_HUMAN_APPROVED,
+        STATUS_DELIVERING,
+        STATUS_PUSHED,
+        STATUS_DELIVERY_FAILED,
+    }:
+        raise ApprovalError("run is not HUMAN_APPROVED or in a valid approved delivery state")
     decision = load_decision(run_dir)
     if decision is None:
         raise ApprovalError("human approval decision missing")
@@ -670,7 +691,12 @@ def _decision_ready_locked(run_dir: Path) -> bool:
         validate_decision_matches_request(run_dir)
     except ApprovalError:
         return False
-    if read_status(run_dir) != STATUS_HUMAN_APPROVED:
+    if read_status(run_dir) not in {
+        STATUS_HUMAN_APPROVED,
+        STATUS_DELIVERING,
+        STATUS_PUSHED,
+        STATUS_DELIVERY_FAILED,
+    }:
         write_status(run_dir, STATUS_HUMAN_APPROVED)
     return True
 
@@ -742,3 +768,62 @@ def mark_notification_sent(
             payload.update(extra)
         atomic_write_json(path, payload)
         return True
+
+
+def mark_notification_message_sent(
+    run_dir: Path,
+    expected_notification_id: str,
+    message_id: int,
+) -> bool:
+    """Persist one Telegram chunk immediately so retries never duplicate it."""
+    run_dir = Path(run_dir)
+    path = run_dir / NOTIFY_FILENAME
+    with run_scoped_lock(run_dir, lock_name=LOCK_FILENAME):
+        payload = read_json(path)
+        if payload.get("notification_id") != expected_notification_id or payload.get("sent_at"):
+            return False
+        sent = payload.get("sent_message_ids")
+        if not isinstance(sent, list):
+            sent = []
+        sent.append(int(message_id))
+        payload["sent_message_ids"] = sent
+        atomic_write_json(path, payload)
+        return True
+
+
+def apply_human_rejection(
+    *,
+    run_dir: Path,
+    callback_token: str,
+    telegram_user_id: int,
+    telegram_chat_id: int,
+    allowed_user_id: int,
+    allowed_chat_id: int,
+) -> str:
+    """Consume an authenticated pending token as a rejection; never deliver."""
+    if telegram_user_id != allowed_user_id or telegram_chat_id != allowed_chat_id:
+        return "rejected_unauthorized"
+    run_dir = Path(run_dir)
+    request_path = run_dir / REQUEST_FILENAME
+    with run_scoped_lock(run_dir, lock_name=LOCK_FILENAME):
+        if read_status(run_dir) != STATUS_AWAITING or not request_path.is_file():
+            return "rejected_wrong_state"
+        request = read_json(request_path)
+        if request.get("callback_token") != callback_token or request.get("token_consumed"):
+            return "rejected_token"
+        request["token_consumed"] = True
+        atomic_write_json(request_path, request)
+        atomic_write_json(
+            run_dir / "human_rejection.json",
+            {
+                "schema_version": SCHEMA_VERSION,
+                "decision": "reject",
+                "run_id": request.get("run_id"),
+                "diff_hash": request.get("diff_hash"),
+                "telegram_user_id": telegram_user_id,
+                "telegram_chat_id": telegram_chat_id,
+                "decided_at": utc_now_iso(),
+            },
+        )
+        write_status(run_dir, STATUS_BLOCKED)
+        return "rejected"

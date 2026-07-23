@@ -8,6 +8,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -22,6 +23,7 @@ from .approval import (
 )
 from .bridge import Bridge, build_awaiting_summary, build_blocked_summary
 from .config import ConfigError, human_approval_timeout_sec, load_bridge_config
+from .delivery import DeliveryError, deliver_run, freeze_delivery_config
 from .atomic import atomic_write_json
 from .paths import (
     PathConfigError,
@@ -44,6 +46,14 @@ from .runstate import (
     write_run_metadata,
 )
 from .runtime import phase_settings, supervise_command, tracked_worktree_clean
+from .snapshot import (
+    SUMMARY_FILENAME,
+    SnapshotError,
+    build_snapshot_manifest,
+    prepare_review_artifacts,
+    reject_nonignored_special_files,
+    validate_documentation,
+)
 from .telegram import TelegramClient
 
 
@@ -115,11 +125,25 @@ def cmd_create_request(args: argparse.Namespace) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     summary = build_awaiting_summary(request["task_id"], args.review_report)
+    messages = None
+    summary_path = Path(args.run_dir) / SUMMARY_FILENAME
+    if summary_path.is_file():
+        try:
+            technical = json.loads(summary_path.read_text(encoding="utf-8"))
+            configured = technical.get("telegram_messages")
+            if isinstance(configured, list) and configured and all(
+                isinstance(item, str) for item in configured
+            ):
+                messages = configured
+                summary = configured[0]
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            messages = None
     enqueue_notification(
         run_dir=Path(args.run_dir),
         kind="awaiting_human_approval",
         summary=summary,
         report_hint=Path(args.review_report).name,
+        messages=messages,
     )
     print(request["run_id"])
     return 0
@@ -253,6 +277,12 @@ def cmd_run_bootstrap(args: argparse.Namespace) -> int:
     if result == 0 and not tracked_worktree_clean(Path(args.worktree), args.base_commit):
         print("ERROR: bootstrap modified tracked repository files", file=sys.stderr)
         return 125
+    if result == 0:
+        try:
+            reject_nonignored_special_files(Path(args.worktree))
+        except SnapshotError as exc:
+            print(f"ERROR: bootstrap produced unsafe repository artifacts: {exc}", file=sys.stderr)
+            return 125
     return result
 
 
@@ -294,6 +324,19 @@ def cmd_supervise(args: argparse.Namespace) -> int:
 def cmd_init_run(args: argparse.Namespace) -> int:
     try:
         profile = load_project_profile(Path(args.worktree))
+        task_id = Path(args.task_file).stem
+        task_slug = re.sub(r"[^a-z0-9._-]+", "-", task_id.lower()).strip("-")
+        if not task_slug:
+            raise DeliveryError("cannot derive a safe task slug")
+        delivery = freeze_delivery_config(
+            repo=Path(args.repo).resolve(),
+            worktree=Path(args.worktree).resolve(),
+            base_commit=args.base_commit,
+            task_file=args.task_file,
+            task_id=task_id,
+            task_slug=task_slug,
+            profile=profile,
+        )
         payload = write_run_metadata(
             Path(args.run_dir),
             {
@@ -304,9 +347,10 @@ def cmd_init_run(args: argparse.Namespace) -> int:
                 "max_iterations": args.max_iterations,
                 "env_file": str(Path(args.env_file).expanduser().resolve()) if args.env_file else None,
                 "profile": profile.public_dict(),
+                "delivery": delivery,
             },
         )
-    except (OSError, ProfileError, RunStateError) as exc:
+    except (OSError, ProfileError, RunStateError, DeliveryError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     print(payload["run_id"])
@@ -396,6 +440,58 @@ def cmd_record_review_snapshot(args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+    return 0
+
+
+def cmd_validate_documentation(args: argparse.Namespace) -> int:
+    try:
+        profile = load_project_profile(Path(args.worktree))
+        manifest = build_snapshot_manifest(Path(args.worktree), args.base_commit)
+        changed = validate_documentation(
+            profile,
+            manifest,
+            task_id=args.task_id,
+            task_slug=args.task_slug,
+        )
+    except (OSError, ProfileError, SnapshotError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps({"documentation": changed}, sort_keys=True))
+    return 0
+
+
+def cmd_prepare_review_artifacts(args: argparse.Namespace) -> int:
+    try:
+        profile = load_project_profile(Path(args.worktree))
+        summary, _messages = prepare_review_artifacts(
+            run_dir=Path(args.run_dir),
+            repo=Path(args.repo),
+            worktree=Path(args.worktree),
+            task_file=args.task_file,
+            task_id=args.task_id,
+            task_slug=args.task_slug,
+            base_commit=args.base_commit,
+            iteration=args.iteration,
+            max_iterations=args.max_iterations,
+            executor_report=Path(args.executor_report),
+            reviewer_report=Path(args.reviewer_report),
+            reviewed_hash=args.reviewed_hash,
+            profile=profile,
+        )
+    except (OSError, ProfileError, SnapshotError, ValueError, json.JSONDecodeError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps({"file_count": summary["file_count"]}, sort_keys=True))
+    return 0
+
+
+def cmd_deliver_run(args: argparse.Namespace) -> int:
+    try:
+        result = deliver_run(Path(args.run_dir))
+    except DeliveryError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
 
@@ -617,6 +713,41 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--iteration", type=int, required=True)
     p.add_argument("--diff-hash", required=True)
     p.set_defaults(func=cmd_record_review_snapshot)
+
+    p = sub.add_parser(
+        "validate-documentation",
+        help="Require configured documentation paths in the current snapshot",
+    )
+    p.add_argument("--worktree", required=True)
+    p.add_argument("--base-commit", required=True)
+    p.add_argument("--task-id", required=True)
+    p.add_argument("--task-slug", required=True)
+    p.set_defaults(func=cmd_validate_documentation)
+
+    p = sub.add_parser(
+        "prepare-review-artifacts",
+        help="Freeze the reviewed manifest and Telegram technical summary",
+    )
+    p.add_argument("--run-dir", required=True)
+    p.add_argument("--repo", required=True)
+    p.add_argument("--worktree", required=True)
+    p.add_argument("--task-file", required=True)
+    p.add_argument("--task-id", required=True)
+    p.add_argument("--task-slug", required=True)
+    p.add_argument("--base-commit", required=True)
+    p.add_argument("--iteration", type=int, required=True)
+    p.add_argument("--max-iterations", type=int, required=True)
+    p.add_argument("--executor-report", required=True)
+    p.add_argument("--reviewer-report", required=True)
+    p.add_argument("--reviewed-hash", required=True)
+    p.set_defaults(func=cmd_prepare_review_artifacts)
+
+    p = sub.add_parser(
+        "deliver-run",
+        help="Publish the exact human-approved snapshot to its frozen branch",
+    )
+    p.add_argument("--run-dir", required=True)
+    p.set_defaults(func=cmd_deliver_run)
 
     p = sub.add_parser("review-status", help="Validate a complete reviewer JSON report")
     p.add_argument("--file", required=True)

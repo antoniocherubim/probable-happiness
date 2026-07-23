@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
 
 from .approval import (
     apply_human_approval,
+    apply_human_rejection,
     find_run_dir_by_token,
     list_pending_notifications,
+    mark_notification_message_sent,
     mark_notification_sent,
     truncate_message,
 )
 from .config import BridgeConfig
+from .delivery import DeliveryError, deliver_run
 from .telegram import TelegramClient, TelegramError
 
 logger = logging.getLogger("agent_dx.bridge")
@@ -40,12 +44,14 @@ class Bridge:
         sent = 0
         for run_dir, payload in list_pending_notifications(self.runs_root):
             try:
-                self._send_notification(run_dir, payload)
+                completed = self._send_notification(run_dir, payload)
             except TelegramError as exc:
                 logger.warning("telegram notify failed for %s: %s", run_dir.name, exc)
                 continue
             except Exception:
                 logger.exception("unexpected notify failure for %s", run_dir.name)
+                continue
+            if not completed:
                 continue
             try:
                 marked = mark_notification_sent(
@@ -61,7 +67,7 @@ class Bridge:
             sent += 1
         return sent
 
-    def _send_notification(self, run_dir: Path, payload: dict[str, Any]) -> None:
+    def _send_notification(self, run_dir: Path, payload: dict[str, Any]) -> bool:
         kind = payload.get("kind")
         run_id = payload.get("run_id", run_dir.name)
         summary = truncate_message(str(payload.get("summary") or kind or "update"))
@@ -76,31 +82,56 @@ class Bridge:
         if report_hint:
             lines.append(f"report: {report_hint}")
         lines.append(summary)
-        text = truncate_message("\n".join(lines))
-
-        reply_markup = None
-        # BLOCKED / failure must never offer an approval button.
-        if (
-            kind == "awaiting_human_approval"
-            and payload.get("offer_approval_button")
-            and payload.get("callback_token")
-        ):
-            reply_markup = {
-                "inline_keyboard": [
-                    [
-                        {
-                            "text": "Approve human gate",
-                            "callback_data": str(payload["callback_token"])[:64],
-                        }
-                    ]
-                ]
-            }
-
-        self.client.send_message(
-            self.config.allowed_chat_id,
-            text,
-            reply_markup=reply_markup,
+        legacy_text = truncate_message("\n".join(lines))
+        configured = payload.get("messages")
+        messages = (
+            [truncate_message(str(item)) for item in configured]
+            if isinstance(configured, list) and configured
+            else [legacy_text]
         )
+        sent_ids = payload.get("sent_message_ids")
+        sent_count = len(sent_ids) if isinstance(sent_ids, list) else 0
+        if sent_count > len(messages):
+            logger.warning("invalid Telegram chunk cursor for %s", run_dir.name)
+            return False
+
+        notification_id = str(payload.get("notification_id") or "")
+        for index in range(sent_count, len(messages)):
+            reply_markup = None
+            # Only the final chunk offers a decision; blocked/failure never do.
+            if (
+                index == len(messages) - 1
+                and kind == "awaiting_human_approval"
+                and payload.get("offer_approval_button")
+                and payload.get("callback_token")
+            ):
+                token = str(payload["callback_token"])
+                reply_markup = {
+                    "inline_keyboard": [
+                        [
+                            {
+                                "text": "Aprovar e publicar branch",
+                                "callback_data": token[:64],
+                            },
+                            {
+                                "text": "Rejeitar",
+                                "callback_data": f"reject:{token}"[:64],
+                            },
+                        ]
+                    ]
+                }
+            result = self.client.send_message(
+                self.config.allowed_chat_id,
+                messages[index],
+                reply_markup=reply_markup,
+            )
+            message_id = result.get("message_id")
+            if type(message_id) is not int:
+                raise TelegramError("sendMessage returned no integer message_id")
+            if not mark_notification_message_sent(run_dir, notification_id, message_id):
+                logger.info("notification replaced while sending chunks for %s", run_dir.name)
+                return False
+        return True
 
     def process_updates_once(self) -> int:
         try:
@@ -179,14 +210,33 @@ class Bridge:
             answer(NEUTRAL_UNAUTHORIZED)
             return
 
-        run_dir = find_run_dir_by_token(self.runs_root, data)
+        rejecting = data.startswith("reject:")
+        token = data.removeprefix("reject:") if rejecting else data
+        run_dir = find_run_dir_by_token(self.runs_root, token)
         if run_dir is None:
             answer("Unknown or expired approval.")
             return
 
+        if rejecting:
+            result = apply_human_rejection(
+                run_dir=run_dir,
+                callback_token=token,
+                telegram_user_id=int(user_id),
+                telegram_chat_id=int(chat_id),
+                allowed_user_id=self.config.allowed_user_id,
+                allowed_chat_id=self.config.allowed_chat_id,
+            )
+            if result == "rejected":
+                answer("Rejeitado. Nenhuma branch foi publicada.")
+            elif result == "rejected_unauthorized":
+                answer(NEUTRAL_UNAUTHORIZED)
+            else:
+                answer("Rejection not applicable.")
+            return
+
         result, _decision = apply_human_approval(
             run_dir=run_dir,
-            callback_token=data,
+            callback_token=token,
             telegram_user_id=int(user_id),
             telegram_chat_id=int(chat_id),
             allowed_user_id=self.config.allowed_user_id,
@@ -194,7 +244,23 @@ class Bridge:
         )
 
         if result in {"accepted", "idempotent_replay"}:
-            answer("Approved.")
+            try:
+                metadata = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                metadata = {}
+            frozen_delivery = metadata.get("delivery")
+            if not isinstance(frozen_delivery, dict) or frozen_delivery.get("mode") != "push_branch":
+                answer("Approved.")
+                return
+            try:
+                delivery = deliver_run(run_dir)
+            except DeliveryError:
+                answer("Aprovado, mas a publicação da branch falhou.")
+                return
+            if delivery.get("status") == "PUSHED":
+                answer("Aprovado e branch publicada.")
+            else:
+                answer("Approved.")
             return
         if result == "rejected_unauthorized":
             answer(NEUTRAL_UNAUTHORIZED)

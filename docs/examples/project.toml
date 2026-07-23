@@ -26,6 +26,22 @@ commands = [
 executor = [".agent-loop/executor.md"]
 reviewer = [".agent-loop/reviewer.md"]
 
+[documentation]
+required = true
+required_paths = [
+  "ROADMAP.md",
+  "docs/tasks/{task_id}.md",
+]
+
+# Opt-in. Omita esta tabela para terminar em HUMAN_APPROVED sem commit/push.
+[delivery]
+mode = "push_branch"
+remote = "origin"
+base_branch = "main"
+branch_template = "{task_slug}"
+commit_message_template = "{task_id}: {task_title}"
+push_after_human_approval = true
+
 [policy]
 missing_profile = "deny"
 terminate_grace_seconds = 5

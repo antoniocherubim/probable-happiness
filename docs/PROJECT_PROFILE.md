@@ -23,6 +23,14 @@ comando é um array `argv`; nenhum valor passa por `eval` ou shell implícito.
 | `environment.required` | nomes de variável | vazio, sem duplicatas |
 | `validation.commands` | arrays `argv` | vazio, máximo 32 |
 | `instructions.executor/reviewer` | caminhos relativos | vazio, 256 KiB/arquivo |
+| `documentation.required` | booleano | `false` |
+| `documentation.required_paths` | templates relativos | vazio; `{task_id}`, `{task_slug}` |
+| `delivery.mode` | `none` ou `push_branch` | `none` |
+| `delivery.remote` | nome de remote | `origin` |
+| `delivery.base_branch` | ref de branch | `main` |
+| `delivery.branch_template` | template de ref | `{task_slug}` |
+| `delivery.commit_message_template` | template de texto | `{task_id}: {task_title}` |
+| `delivery.push_after_human_approval` | booleano | `false` |
 | `policy.missing_profile` | `allow` ou `deny` | `allow` |
 | `policy.terminate_grace_seconds` | inteiro | `5`, 1–300 |
 
@@ -30,6 +38,35 @@ Projetos sem perfil usam defaults seguros e o formato antigo continua válido.
 Use `--require-profile` para bloquear a criação de um run sem o arquivo. O valor
 `policy.missing_profile = "deny"` documenta a política quando o perfil existe; a
 flag é a proteção aplicável quando ele está ausente.
+
+Templates são analisados sem `eval`. Documentação aceita somente `{task_id}` e
+`{task_slug}`; branch aceita os mesmos campos; mensagem de commit também aceita
+`{task_title}`. Placeholder desconhecido, caminho absoluto/com `..`, remote
+inválido ou ref rejeitada por `git check-ref-format` bloqueia o preflight.
+
+## Documentação obrigatória
+
+Quando `documentation.required = true`, cada caminho renderizado deve ter sido
+criado ou alterado no snapshot final. O executor recebe instrução para registrar
+comportamento, testes e riscos; o reviewer valida a precisão. Ausência bloqueia
+o gate humano. O loop não edita documentação por heurística e não exige SHA ou
+URL de uma branch que ainda não existe.
+
+## Entrega opt-in
+
+Remote, base, branch, mensagem e hash da URL de push são congelados em
+`run.json`. Após a decisão humana, o loop revalida decisão, `HEAD`, hash e
+manifesto, cria uma index temporária com somente as entradas revisadas, grava
+`tree_oid`/`commit_oid`, cria a ref local e usa refspec explícito sem force:
+
+```text
+<commit_oid>:refs/heads/<branch>
+```
+
+`main`, `master` e a base configurada nunca são alvos. Branch remota diferente
+gera `remote_branch_exists`; a mesma branch no mesmo commit é idempotente.
+Credenciais Git não são copiadas para o run: usa-se apenas a autenticação já
+configurada pelo usuário.
 
 ## Bootstrap e ambiente
 
@@ -79,6 +116,9 @@ CHANGES_REQUESTED       -> executor da próxima iteração
 BLOCKED + --review-only -> nova revisão do snapshot atual
 AWAITING_HUMAN_APPROVAL -> apenas retoma wait-decision
 HUMAN_APPROVED          -> valida decisão/hash; não repete gate
+HUMAN_APPROVED + delivery -> DELIVERING -> PUSHED
+DELIVERING/DELIVERY_FAILED -> retoma somente delivery
+PUSHED                  -> terminal; não repete push
 ```
 
 ```bash
@@ -90,6 +130,26 @@ O wrapper mantém `.resume.lock` durante toda a retomada. Antes de iniciar,
 valida metadados, task no base commit, `HEAD`, repositório comum do worktree,
 perfil congelado e hash pré-revisão. Drift durante/depois da revisão ou no gate
 humano é recusado. Um `APPROVED` isolado sempre volta a uma nova revisão.
+
+Exemplo abreviado de `delivery.json`:
+
+```json
+{
+  "schema_version": 1,
+  "task_id": "CP-00",
+  "status": "PUSHED",
+  "branch": "cp-00",
+  "remote": "origin",
+  "base_commit": "0123456789abcdef",
+  "reviewed_diff_hash": "752aef57...",
+  "commit_oid": "abc123...",
+  "tree_oid": "def456...",
+  "remote_oid": "abc123...",
+  "push_result": "pushed",
+  "branch_url": "https://github.com/org/repo/tree/cp-00",
+  "compare_url": "https://github.com/org/repo/compare/main...cp-00"
+}
+```
 
 ## Evidência complementar
 
@@ -108,6 +168,8 @@ Anexar não altera status. Somente uma nova revisão pode abrir o gate humano.
 - O motor não provisiona bancos/containers; o bootstrap somente prepara ou
   verifica recursos autorizados pelo projeto.
 - Outro processo do mesmo usuário ainda pode alterar o worktree fora do lock;
-  hashes antes/depois da revisão e `verify` detectam esse drift.
+  hashes antes/depois da revisão, antes do push e `verify` detectam esse drift.
+- Autenticação e políticas server-side do remote continuam externas; falhas
+  ficam em `DELIVERY_FAILED` e exigem correção operacional antes do `resume`.
 - `SIGKILL` aplicado ao próprio supervisor pode impedir sua gravação final; o
   próximo `resume` trata o artefato parcial como interrupção, nunca sucesso.

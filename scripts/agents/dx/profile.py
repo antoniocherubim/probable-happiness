@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+import string
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,8 +22,20 @@ _SAFE_SECTIONS = {
     "environment": {"required"},
     "validation": {"commands"},
     "instructions": {"executor", "reviewer"},
+    "documentation": {"required", "required_paths"},
+    "delivery": {
+        "mode",
+        "remote",
+        "base_branch",
+        "branch_template",
+        "commit_message_template",
+        "push_after_human_approval",
+    },
     "policy": {"missing_profile", "terminate_grace_seconds"},
 }
+_DOCUMENTATION_FIELDS = {"task_id", "task_slug"}
+_BRANCH_FIELDS = {"task_id", "task_slug"}
+_COMMIT_FIELDS = {"task_id", "task_slug", "task_title"}
 _BASE_ENV = {
     "HOME",
     "LANG",
@@ -62,6 +75,14 @@ class ProjectProfile:
     required_environment: tuple[str, ...] = ()
     executor_instructions: tuple[str, ...] = ()
     reviewer_instructions: tuple[str, ...] = ()
+    documentation_required: bool = False
+    documentation_paths: tuple[str, ...] = ()
+    delivery_mode: str = "none"
+    delivery_remote: str = "origin"
+    delivery_base_branch: str = "main"
+    delivery_branch_template: str = "{task_slug}"
+    delivery_commit_message_template: str = "{task_id}: {task_title}"
+    delivery_push_after_human_approval: bool = False
     missing_profile: str = "allow"
     terminate_grace_seconds: int = 5
 
@@ -87,6 +108,18 @@ class ProjectProfile:
             "instructions": {
                 "executor": list(self.executor_instructions),
                 "reviewer": list(self.reviewer_instructions),
+            },
+            "documentation": {
+                "required": self.documentation_required,
+                "required_paths": list(self.documentation_paths),
+            },
+            "delivery": {
+                "mode": self.delivery_mode,
+                "remote": self.delivery_remote,
+                "base_branch": self.delivery_base_branch,
+                "branch_template": self.delivery_branch_template,
+                "commit_message_template": self.delivery_commit_message_template,
+                "push_after_human_approval": self.delivery_push_after_human_approval,
             },
             "policy": {
                 "missing_profile": self.missing_profile,
@@ -151,6 +184,25 @@ def _string_list(value: Any, field: str, *, environment: bool = False) -> tuple[
     return tuple(result)
 
 
+def _template(value: Any, field: str, default: str, allowed: set[str]) -> str:
+    if value is None:
+        value = default
+    if not isinstance(value, str) or not value or len(value) > 512 or "\x00" in value:
+        raise ProfileError(f"{field} must be a non-empty template string")
+    try:
+        parsed = list(string.Formatter().parse(value))
+    except ValueError as exc:
+        raise ProfileError(f"invalid {field}: {exc}") from exc
+    fields = {name for _literal, name, _spec, _conversion in parsed if name is not None}
+    if not fields <= allowed:
+        unknown = fields - allowed
+        raise ProfileError(f"unknown placeholder(s) in {field}: {', '.join(sorted(unknown))}")
+    for _literal, name, spec, conversion in parsed:
+        if name is not None and (spec or conversion):
+            raise ProfileError(f"format specifiers/conversions are forbidden in {field}")
+    return value
+
+
 def load_project_profile(repo: Path | str, *, missing_policy: str = "allow") -> ProjectProfile:
     repo_path = Path(repo).resolve()
     path = repo_path / PROFILE_RELATIVE_PATH
@@ -181,10 +233,43 @@ def load_project_profile(repo: Path | str, *, missing_policy: str = "allow") -> 
     environment = _table(data, "environment")
     validation = _table(data, "validation")
     instructions = _table(data, "instructions")
+    documentation = _table(data, "documentation")
+    delivery = _table(data, "delivery")
     policy = _table(data, "policy")
     configured_missing = policy.get("missing_profile", "allow")
     if configured_missing not in {"allow", "deny"}:
         raise ProfileError("policy.missing_profile must be 'allow' or 'deny'")
+    documentation_required = documentation.get("required", False)
+    if type(documentation_required) is not bool:
+        raise ProfileError("documentation.required must be a boolean")
+    documentation_paths = _string_list(
+        documentation.get("required_paths"), "documentation.required_paths"
+    )
+    for path_template in documentation_paths:
+        rendered = _template(
+            path_template,
+            "documentation.required_paths",
+            path_template,
+            _DOCUMENTATION_FIELDS,
+        ).format(task_id="task", task_slug="task")
+        if Path(rendered).is_absolute() or ".." in Path(rendered).parts:
+            raise ProfileError("documentation path template must remain repository-relative")
+    if documentation_required and not documentation_paths:
+        raise ProfileError("documentation.required needs at least one required_paths entry")
+    delivery_mode = delivery.get("mode", "none")
+    if delivery_mode not in {"none", "push_branch"}:
+        raise ProfileError("delivery.mode must be 'none' or 'push_branch'")
+    delivery_remote = delivery.get("remote", "origin")
+    delivery_base_branch = delivery.get("base_branch", "main")
+    if not isinstance(delivery_remote, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", delivery_remote):
+        raise ProfileError("delivery.remote must be a safe Git remote name")
+    if not isinstance(delivery_base_branch, str) or not delivery_base_branch:
+        raise ProfileError("delivery.base_branch must be a non-empty string")
+    push_after = delivery.get("push_after_human_approval", False)
+    if type(push_after) is not bool:
+        raise ProfileError("delivery.push_after_human_approval must be a boolean")
+    if delivery_mode == "push_branch" and not push_after:
+        raise ProfileError("push_branch delivery requires push_after_human_approval = true")
 
     return ProjectProfile(
         path=path,
@@ -210,6 +295,24 @@ def load_project_profile(repo: Path | str, *, missing_policy: str = "allow") -> 
         ),
         executor_instructions=_string_list(instructions.get("executor"), "instructions.executor"),
         reviewer_instructions=_string_list(instructions.get("reviewer"), "instructions.reviewer"),
+        documentation_required=documentation_required,
+        documentation_paths=documentation_paths,
+        delivery_mode=delivery_mode,
+        delivery_remote=delivery_remote,
+        delivery_base_branch=delivery_base_branch,
+        delivery_branch_template=_template(
+            delivery.get("branch_template"),
+            "delivery.branch_template",
+            "{task_slug}",
+            _BRANCH_FIELDS,
+        ),
+        delivery_commit_message_template=_template(
+            delivery.get("commit_message_template"),
+            "delivery.commit_message_template",
+            "{task_id}: {task_title}",
+            _COMMIT_FIELDS,
+        ),
+        delivery_push_after_human_approval=push_after,
         missing_profile=configured_missing,
         terminate_grace_seconds=_bounded_int(
             policy.get("terminate_grace_seconds"),
@@ -302,6 +405,9 @@ def build_authorized_environment(
 
 
 _URL = re.compile(r"(?i)\b(?:postgres(?:ql)?|https?|redis|mysql)://[^\s'\"]+")
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b(token|password|passwd|secret|api[_-]?key)\s*[:=]\s*([^\s,;]+)"
+)
 
 
 def sanitize_text(text: str, secrets: Mapping[str, str] | None = None) -> str:
@@ -309,6 +415,7 @@ def sanitize_text(text: str, secrets: Mapping[str, str] | None = None) -> str:
     for value in sorted(set((secrets or {}).values()), key=len, reverse=True):
         if value:
             result = result.replace(value, "[REDACTED]")
+    result = _SECRET_ASSIGNMENT.sub(lambda match: f"{match.group(1)}=[REDACTED]", result)
     return _URL.sub("[REDACTED_URL]", result)
 
 
