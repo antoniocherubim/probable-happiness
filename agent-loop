@@ -16,7 +16,7 @@ usage() {
     "Usage:" \
     "  agent-loop run --repo <path> [--state-root <path>] [--env-file <path>] [--require-profile] <task-file> [max-iterations] [base-ref]" \
     "  agent-loop review --repo <path> [--state-root <path>] [review options] <task-file>" \
-    "  agent-loop resume --run-dir <path> [--review-only] [--env-file <path>]" \
+    "  agent-loop resume --run-dir <path> [--review-only] [--additional-iterations <n>] [--env-file <path>]" \
     "  agent-loop evidence --run-dir <path> --file <report>" \
     "  agent-loop profile --repo <path>" \
     "  agent-loop serve [--state-root <path>]" \
@@ -115,15 +115,33 @@ case "$COMMAND" in
   resume)
     RUN_DIR=""
     REVIEW_ARGS=()
+    REVIEW_ONLY_SEEN=0
+    ADDITIONAL_ITERATIONS_SEEN=0
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --run-dir) [[ $# -ge 2 ]] || die "--run-dir requires a path"; RUN_DIR="$2"; shift 2 ;;
-        --review-only) REVIEW_ARGS+=(--review-only); shift ;;
+        --review-only)
+          [[ "$REVIEW_ONLY_SEEN" -eq 0 ]] || die "--review-only may be provided only once"
+          REVIEW_ONLY_SEEN=1
+          REVIEW_ARGS+=(--review-only)
+          shift
+          ;;
+        --additional-iterations)
+          [[ $# -ge 2 ]] || die "--additional-iterations requires a positive integer"
+          [[ "$ADDITIONAL_ITERATIONS_SEEN" -eq 0 ]] || \
+            die "--additional-iterations may be provided only once"
+          ADDITIONAL_ITERATIONS_SEEN=1
+          REVIEW_ARGS+=(--additional-iterations "$2")
+          shift 2
+          ;;
         --env-file) [[ $# -ge 2 ]] || die "--env-file requires a path"; REVIEW_ARGS+=(--env-file "$2"); shift 2 ;;
         *) die "unknown resume option: $1" ;;
       esac
     done
     [[ -n "$RUN_DIR" ]] || die "resume requires --run-dir"
+    if [[ "$REVIEW_ONLY_SEEN" -eq 1 && "$ADDITIONAL_ITERATIONS_SEEN" -eq 1 ]]; then
+      die "--review-only cannot be combined with --additional-iterations; no run artifact was changed"
+    fi
     [[ -d "$RUN_DIR" ]] || die "run directory not found: $RUN_DIR"
     [[ ! -L "$RUN_DIR" ]] || die "run directory may not be a symlink"
     exec "$PYTHON_BIN" "$DX_CLI" resume-exec --run-dir "$RUN_DIR" "${REVIEW_ARGS[@]}"

@@ -644,7 +644,12 @@ _run_task_entry() {
     esac
   done
 
-  block_run "Maximum review iterations reached" loop "$(basename "$RUN_DIR")" max_iterations
+  iteration="$MAX_ITERATIONS"
+  block_run \
+    "Maximum review iterations reached; worktree and last reviewer feedback were preserved. Continue only with an explicit --additional-iterations authorization." \
+    loop \
+    "review-${MAX_ITERATIONS}.json" \
+    max_review_iterations
   die "maximum review iterations reached; worktree preserved at $WORKTREE"
 }
 

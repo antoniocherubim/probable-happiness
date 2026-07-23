@@ -169,6 +169,18 @@ liberação de escrita somente para o state root.
 - `PUSHED`: commit e OID remoto confirmados; terminal com delivery;
 - `BLOCKED`: falha, interrupção, dependência externa ou limite atingido.
 
+Quando a causa for exclusivamente `max_review_iterations`, a notificação
+informa que worktree e último feedback foram preservados. A continuação exige
+CLI explícita:
+
+```bash
+./agent-loop resume --run-dir /state/projects/<repo>/runs/<run> \
+  --additional-iterations 3
+```
+
+Não há botão Telegram nesta versão. Isso evita autorização parcial sem o mesmo
+protocolo de `.resume.lock`, ledger e recuperação idempotente da CLI.
+
 Interrupções `INT`, `TERM` e `HUP` marcam runs ativos como `BLOCKED`, enviam
 notificação best-effort e preservam o worktree. O outbox usa identificador por
 mensagem para não consumir uma notificação substituída durante envio.
@@ -182,6 +194,13 @@ APPROVED → AWAITING_HUMAN_APPROVAL
                                                           ├─ sucesso → PUSHED
                                                           └─ falha → DELIVERY_FAILED
                                                                        └─ resume → DELIVERING
+
+CHANGES_REQUESTED em N = limite
+  → BLOCKED/max_review_iterations
+  → autorização atômica em iteration-budget.json
+  → CHANGES_REQUESTED
+  → executor em N+1 com o review-N.json
+  → validações → reviewer → gate humano normal ou novo limite
 ```
 
 O commit nasce de uma index temporária baseada no commit-base e no manifesto

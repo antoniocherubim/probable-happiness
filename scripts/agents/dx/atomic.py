@@ -93,7 +93,12 @@ def exclusive_write_json(path: Path, payload: dict[str, Any], mode: int = 0o600)
 
 
 @contextmanager
-def run_scoped_lock(run_dir: Path, lock_name: str = ".approval.lock") -> Iterator[None]:
+def run_scoped_lock(
+    run_dir: Path,
+    lock_name: str = ".approval.lock",
+    *,
+    blocking: bool = True,
+) -> Iterator[None]:
     """
     Exclusive flock for a run directory.
 
@@ -112,7 +117,8 @@ def run_scoped_lock(run_dir: Path, lock_name: str = ".approval.lock") -> Iterato
         os.close(fd)
         raise ValueError(f"lock path is not a regular file: {lock_path}")
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        operation = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+        fcntl.flock(fd, operation)
         yield
     finally:
         try:

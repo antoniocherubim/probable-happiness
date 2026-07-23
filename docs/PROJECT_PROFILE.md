@@ -114,6 +114,7 @@ EXECUTING/interrompido  -> executor da mesma iteração
 REVIEWING/interrompido  -> nova revisão do snapshot pré-revisão
 CHANGES_REQUESTED       -> executor da próxima iteração
 BLOCKED + --review-only -> nova revisão do snapshot atual
+BLOCKED/max_review_iterations + orçamento explícito -> executor em N+1
 AWAITING_HUMAN_APPROVAL -> apenas retoma wait-decision
 HUMAN_APPROVED          -> valida decisão/hash; não repete gate
 HUMAN_APPROVED + delivery -> DELIVERING -> PUSHED
@@ -124,12 +125,40 @@ PUSHED                  -> terminal; não repete push
 ```bash
 ./agent-loop resume --run-dir /state/projects/<repo-id>/runs/<run-id>
 ./agent-loop resume --run-dir /state/projects/<repo-id>/runs/<run-id> --review-only
+./agent-loop resume --run-dir /state/projects/<repo-id>/runs/<run-id> \
+  --additional-iterations 3
 ```
 
 O wrapper mantém `.resume.lock` durante toda a retomada. Antes de iniciar,
 valida metadados, task no base commit, `HEAD`, repositório comum do worktree,
 perfil congelado e hash pré-revisão. Drift durante/depois da revisão ou no gate
 humano é recusado. Um `APPROVED` isolado sempre volta a uma nova revisão.
+
+### Ledger de orçamento
+
+`--additional-iterations` aceita de 1 a 20 e nunca altera o limite original em
+`run.json`; o limite efetivo acumulado não pode ultrapassar 50. A autorização
+exige simultaneamente:
+
+- status `BLOCKED` e `failure.json.reason = "max_review_iterations"` (o legado
+  seguro `"max_iterations"` é reconhecido para runs anteriores);
+- cursor igual ao limite efetivo e último `review-N.json` em
+  `CHANGES_REQUESTED`;
+- resultado do reviewer concluído, executor report presente e worktree igual ao
+  `review-N-snapshot.json`;
+- ausência de artefatos de aprovação/delivery e locks concorrentes.
+
+`iteration-budget.json` contém `schema_version`, `run_id`, limites original e
+efetivo e uma cadeia de extensões. Cada item registra incremento, limites
+anterior/novo, origem `cli`, timestamp, iteração, hashes do feedback/snapshot e
+um `idempotency_id` determinístico. Escrita é atômica sob `.resume.lock`. Uma
+queda depois do ledger e antes do status é reconhecida pelo próximo `resume`;
+repetições enquanto a extensão está ativa não somam orçamento.
+
+O feedback autorizado permanece no mesmo `review-N.json`; o executor seguinte
+começa em `N+1`. Alterar o ledger, feedback ou snapshot rompe os bindings e
+impede a retomada. O botão Telegram de extensão não faz parte do DX-04: fica
+como follow-up para evitar uma segunda superfície de autorização nesta entrega.
 
 Exemplo abreviado de `delivery.json`:
 

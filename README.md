@@ -34,6 +34,7 @@ O projeto-alvo não recebe scripts nem estado do runner:
 ./agent-loop run --repo /caminho/do/projeto docs/tasks/CP-00.md 3 main
 ./agent-loop review --repo /caminho/do/projeto docs/tasks/CP-00.md
 ./agent-loop resume --run-dir /caminho/externo/para/o/run
+./agent-loop resume --run-dir /caminho/externo/para/o/run --additional-iterations 3
 ./agent-loop evidence --run-dir /caminho/externo/para/o/run --file /tmp/relatorio.txt
 ```
 
@@ -76,6 +77,25 @@ Uma falha preserva aprovação, worktree e commit local em `DELIVERY_FAILED`:
 ```
 
 A retomada repete somente a entrega; Cursor e Codex não executam novamente.
+
+## Extensão explícita de iterações
+
+Quando — e somente quando — o reviewer devolve `CHANGES_REQUESTED` na última
+iteração e o run termina em `BLOCKED` com motivo estruturado
+`max_review_iterations`, é possível autorizar novo orçamento:
+
+```bash
+./agent-loop resume \
+  --run-dir /state/projects/<repo>/runs/<run> \
+  --additional-iterations 3
+```
+
+Cada extensão aceita de 1 a 20 iterações; o limite efetivo total é 50. O
+`max_iterations` original em `run.json` não muda. A cadeia auditável fica em
+`iteration-budget.json`, vinculada ao último feedback e hash revisado. Repetir o
+mesmo comando durante a extensão ativa é idempotente. Outras causas de
+`BLOCKED`, drift, estados de aprovação/delivery e combinação com
+`--review-only` são recusados sem novo orçamento.
 
 ## systemd --user
 

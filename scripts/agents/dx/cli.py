@@ -39,8 +39,11 @@ from .profile import (
     load_project_profile,
 )
 from .runstate import (
+    IterationBudgetError,
+    MAX_ADDITIONAL_ITERATIONS,
     RunStateError,
     attach_evidence,
+    authorize_iteration_extension,
     plan_resume,
     validate_run,
     write_run_metadata,
@@ -64,6 +67,22 @@ def _repo_root_from_here() -> Path:
 
 def _default_runs_root() -> Path:
     return _repo_root_from_here() / ".agents" / "runs"
+
+
+def _additional_iterations(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "--additional-iterations must be a positive integer; "
+            "no run artifact was changed"
+        ) from exc
+    if not 1 <= parsed <= MAX_ADDITIONAL_ITERATIONS:
+        raise argparse.ArgumentTypeError(
+            f"--additional-iterations must be between 1 and "
+            f"{MAX_ADDITIONAL_ITERATIONS}; no run artifact was changed"
+        )
+    return parsed
 
 
 def cmd_project_state_dir(args: argparse.Namespace) -> int:
@@ -379,7 +398,7 @@ def cmd_resume_plan(args: argparse.Namespace) -> int:
             "worktree",
             "task_file",
             "base_commit",
-            "max_iterations",
+            "effective_max_iterations",
             "env_file",
             "resume_phase",
             "iteration",
@@ -393,6 +412,13 @@ def cmd_resume_plan(args: argparse.Namespace) -> int:
 
 def cmd_resume_exec(args: argparse.Namespace) -> int:
     """Acquire a no-follow run lock and exec the shell engine while holding it."""
+    if args.review_only and args.additional_iterations is not None:
+        print(
+            "ERROR: --review-only cannot be combined with --additional-iterations; "
+            "no run artifact was changed",
+            file=sys.stderr,
+        )
+        return 2
     run_candidate = Path(args.run_dir).expanduser()
     if run_candidate.is_symlink() or not run_candidate.is_dir():
         print("ERROR: run directory must be a regular directory", file=sys.stderr)
@@ -411,6 +437,28 @@ def cmd_resume_exec(args: argparse.Namespace) -> int:
         print(f"ERROR: cannot lock run for resume: {exc}", file=sys.stderr)
         return 1
     os.set_inheritable(fd, True)
+    if args.additional_iterations is not None:
+        try:
+            authorization = authorize_iteration_extension(
+                run_dir,
+                args.additional_iterations,
+                origin="cli",
+                resume_lock_held=True,
+            )
+        except (IterationBudgetError, OSError, ValueError, json.JSONDecodeError) as exc:
+            os.close(fd)
+            print(
+                f"ERROR: iteration extension refused: {exc}. "
+                "No new iteration budget was authorized.",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            "[agent-loop] iteration extension "
+            f"{authorization['result']}: effective limit "
+            f"{authorization['effective_limit']}",
+            file=sys.stderr,
+        )
     command = [
         "bash",
         str(_repo_root_from_here() / "scripts" / "agents" / "run_task.sh"),
@@ -706,6 +754,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--run-dir", required=True)
     p.add_argument("--review-only", action="store_true")
     p.add_argument("--env-file", default=None)
+    p.add_argument("--additional-iterations", type=_additional_iterations, default=None)
     p.set_defaults(func=cmd_resume_exec)
 
     p = sub.add_parser("record-review-snapshot", help="Bind an in-flight review to a diff hash")
