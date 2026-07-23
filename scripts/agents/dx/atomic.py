@@ -5,10 +5,31 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import stat
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
+
+
+def atomic_write_bytes(path: Path, content: bytes, mode: int = 0o600) -> None:
+    """Atomically replace a file without changing its byte content."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def atomic_write_text(path: Path, content: str, mode: int = 0o600) -> None:
@@ -82,7 +103,14 @@ def run_scoped_lock(run_dir: Path, lock_name: str = ".approval.lock") -> Iterato
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     lock_path = run_dir / lock_name
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    fd = os.open(
+        str(lock_path),
+        os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise ValueError(f"lock path is not a regular file: {lock_path}")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield

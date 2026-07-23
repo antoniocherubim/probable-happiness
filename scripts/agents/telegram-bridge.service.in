@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=@TOOL_ROOT@
 EnvironmentFile=@CREDENTIALS_FILE@
+ExecStartPre=+/usr/bin/mkdir -p @STATE_ROOT@
 ExecStart=/usr/bin/python3 @BRIDGE_SCRIPT@ serve --runs-root @STATE_ROOT@
 Restart=on-failure
 RestartSec=5

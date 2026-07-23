@@ -137,6 +137,12 @@ Interrupções `INT`, `TERM` e `HUP` marcam runs ativos como `BLOCKED`, enviam
 notificação best-effort e preservam o worktree. O outbox usa identificador por
 mensagem para não consumir uma notificação substituída durante envio.
 
+## Perfil, ambiente e retomada
+
+O contrato DX-02 está em [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md), incluindo
+schema TOML, bootstrap, ambiente externo `0600`, timeout por grupo de processos,
+heartbeat, `agent-loop resume` e `agent-loop evidence`.
+
 ## Limpeza
 
 Não há limpeza automática. Depois de integrar ou descartar conscientemente:

@@ -3,6 +3,11 @@
 Runner externo para executar uma task com Cursor Agent, revisar o resultado com
 Codex e exigir aprovação humana auditável pelo Telegram.
 
+Projetos consumidores podem declarar bootstrap, ambiente allowlisted, timeouts,
+heartbeat, validações e instruções em `.agent-loop/project.toml`. Runs interrompidos
+podem ser retomados sem descartar o worktree, e evidência complementar permanece
+não confiável até nova revisão. Veja [Perfil e retomada segura](docs/PROJECT_PROFILE.md).
+
 O runner não faz commit, push, merge, deploy, limpeza destrutiva nem inicia a
 próxima task.
 
@@ -25,6 +30,8 @@ O projeto-alvo não recebe scripts nem estado do runner:
 ```bash
 ./agent-loop run --repo /caminho/do/projeto docs/tasks/CP-00.md 3 main
 ./agent-loop review --repo /caminho/do/projeto docs/tasks/CP-00.md
+./agent-loop resume --run-dir /caminho/externo/para/o/run
+./agent-loop evidence --run-dir /caminho/externo/para/o/run --file /tmp/relatorio.txt
 ```
 
 Por padrão, runs e worktrees ficam em:
@@ -70,7 +77,7 @@ O comando apenas gera o arquivo; não habilita nem inicia o serviço.
 
 ## Estrutura
 
-- `agent-loop`: CLI externa (`run`, `review`, `serve`, `verify`, `systemd-unit`);
+- `agent-loop`: CLI externa (`run`, `review`, `resume`, `evidence`, `serve`, `verify`, `systemd-unit`);
 - `scripts/agents/`: executor, revisor e ponte Telegram;
 - `scripts/agents/dx/`: estado, hash, concorrência e cliente Bot API;
 - `.agents/reviewer-output.schema.json`: contrato de saída do revisor;
