@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=@TOOL_ROOT@
-EnvironmentFile=-@CREDENTIALS_FILE@
+EnvironmentFile=@CREDENTIALS_FILE@
 ExecStart=/usr/bin/python3 @BRIDGE_SCRIPT@ serve --runs-root @STATE_ROOT@
 Restart=on-failure
 RestartSec=5

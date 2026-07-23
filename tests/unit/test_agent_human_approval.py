@@ -1603,6 +1603,14 @@ def test_external_state_root_discovers_nested_project_runs(
         summary="ready",
         report_hint="review.json",
     )
+    rogue = state_root / "projects" / "repo-id" / "worktrees" / "task"
+    rogue.mkdir(parents=True)
+    (rogue / approval_mod.REQUEST_FILENAME).write_text(
+        json.dumps({"callback_token": request["callback_token"]}), encoding="utf-8"
+    )
+    (rogue / approval_mod.NOTIFY_FILENAME).write_text(
+        json.dumps({"sent_at": None}), encoding="utf-8"
+    )
 
     assert approval_mod.find_run_dir_by_token(
         state_root, request["callback_token"]
@@ -1610,3 +1618,58 @@ def test_external_state_root_discovers_nested_project_runs(
     pending = approval_mod.list_pending_notifications(state_root)
     assert len(pending) == 1
     assert pending[0][0] == run_dir
+
+
+def test_verify_requires_valid_human_approval(
+    git_worktree: tuple[Path, str], tmp_path: Path
+) -> None:
+    worktree, base = git_worktree
+    run_dir = tmp_path / "runs" / "awaiting-only"
+    run_dir.mkdir(parents=True)
+    _arm_technical_approved(run_dir)
+    create_approval_request(
+        run_dir=run_dir,
+        task="docs/tasks/AG-01.md",
+        base_commit=base,
+        worktree=worktree,
+        review_report="review.json",
+    )
+
+    with pytest.raises(ApprovalError, match="not HUMAN_APPROVED"):
+        verify_reviewed_snapshot(run_dir)
+
+
+def test_sent_marker_cannot_consume_replacement_notification(
+    git_worktree: tuple[Path, str], tmp_path: Path
+) -> None:
+    worktree, base = git_worktree
+    run_dir = tmp_path / "runs" / "notify-replaced"
+    run_dir.mkdir(parents=True)
+    _arm_technical_approved(run_dir)
+    create_approval_request(
+        run_dir=run_dir,
+        task="docs/tasks/AG-01.md",
+        base_commit=base,
+        worktree=worktree,
+        review_report="review.json",
+    )
+    first = enqueue_notification(
+        run_dir=run_dir,
+        kind="awaiting_human_approval",
+        summary="awaiting",
+    )
+    assert first is not None
+
+    approval_mod.write_status(run_dir, STATUS_BLOCKED)
+    replacement = enqueue_notification(
+        run_dir=run_dir,
+        kind="blocked",
+        summary="blocked later",
+    )
+    assert replacement is not None
+    assert approval_mod.mark_notification_sent(
+        run_dir, first["notification_id"]
+    ) is False
+    current = approval_mod.read_json(run_dir / approval_mod.NOTIFY_FILENAME)
+    assert current["notification_id"] == replacement["notification_id"]
+    assert current["sent_at"] is None

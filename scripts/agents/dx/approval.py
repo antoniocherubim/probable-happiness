@@ -407,9 +407,15 @@ def find_run_dir_by_token(runs_root: Path, token: str) -> Path | None:
     runs_root = Path(runs_root)
     if not runs_root.is_dir():
         return None
-    # ``runs_root`` may be one legacy runs directory or the external AG-01
-    # state root containing projects/<repo-id>/runs/<run-id>.
-    for request_path in sorted(runs_root.rglob(REQUEST_FILENAME)):
+    # ``runs_root`` may be one legacy runs directory, one project state root,
+    # or the external AG-01 root. Deliberately avoid recursive worktree scans.
+    patterns = (
+        f"*/{REQUEST_FILENAME}",
+        f"runs/*/{REQUEST_FILENAME}",
+        f"projects/*/runs/*/{REQUEST_FILENAME}",
+    )
+    request_paths = {path for pattern in patterns for path in runs_root.glob(pattern)}
+    for request_path in sorted(request_paths):
         child = request_path.parent
         try:
             request = read_json(request_path)
@@ -699,9 +705,15 @@ def list_pending_notifications(runs_root: Path) -> list[tuple[Path, dict[str, An
     pending: list[tuple[Path, dict[str, Any]]] = []
     if not runs_root.is_dir():
         return pending
-    # Recursive discovery lets one bridge serve isolated state directories for
-    # multiple target repositories while retaining legacy direct-runs support.
-    for notify_path in sorted(runs_root.rglob(NOTIFY_FILENAME)):
+    # Discover only recognized run layouts. The state root also contains
+    # worktrees, whose repository contents must never be interpreted as outbox.
+    patterns = (
+        f"*/{NOTIFY_FILENAME}",
+        f"runs/*/{NOTIFY_FILENAME}",
+        f"projects/*/runs/*/{NOTIFY_FILENAME}",
+    )
+    notify_paths = {path for pattern in patterns for path in runs_root.glob(pattern)}
+    for notify_path in sorted(notify_paths):
         child = notify_path.parent
         try:
             payload = read_json(notify_path)

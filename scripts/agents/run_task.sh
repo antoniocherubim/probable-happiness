@@ -58,6 +58,27 @@ fail_human_approval_setup() {
   exit 1
 }
 
+handle_loop_signal() {
+  local signal_name="$1"
+  local exit_code="$2"
+  local current_status=""
+  trap - INT TERM HUP
+  if [[ -n "${RUN_DIR:-}" && -d "$RUN_DIR" ]]; then
+    if [[ -f "$RUN_DIR/status" ]]; then
+      current_status="$(tr -d '\n' < "$RUN_DIR/status")"
+    fi
+    case "$current_status" in
+      HUMAN_APPROVED|BLOCKED) ;;
+      *)
+        printf '%s\n' "BLOCKED" > "$RUN_DIR/status"
+        notify_terminal_failure "Agent loop interrupted by $signal_name" "" failure
+        ;;
+    esac
+    note "interrupted by $signal_name; status=$(tr -d '\n' < "$RUN_DIR/status"); worktree preserved: ${WORKTREE:-unknown}"
+  fi
+  exit "$exit_code"
+}
+
 allocate_exclusive_run_dir() {
   # Create a unique run directory exclusively (never mkdir -p on the final path).
   # Second-resolution stamp collisions get a numeric suffix instead of reusing artifacts.
@@ -136,7 +157,7 @@ await_human_approval() {
   # helper so a concurrent claim cannot be downgraded by a non-atomic shell write.
   if [[ "$wait_rc" -eq 0 ]]; then
     note "HUMAN_APPROVED for reviewed diff_hash=${reviewed_diff_hash}; worktree preserved for planner: $WORKTREE"
-    note "before integrating, run: python3 scripts/agents/dx/cli.py verify-reviewed-snapshot --run-dir $RUN_DIR"
+    note "before integrating, run: ${TOOL_ROOT:-$AGENT_LOOP_SCRIPT_TOOL_ROOT}/agent-loop verify --run-dir $RUN_DIR"
     exit 0
   fi
 
@@ -301,6 +322,9 @@ _run_task_entry() {
   printf '%s\n' "$BASE_COMMIT" > "$RUN_DIR/base_commit"
   printf '%s\n' "$WORKTREE" > "$RUN_DIR/worktree"
   printf '%s\n' "$TASK_FILE" > "$RUN_DIR/task_file"
+  trap 'handle_loop_signal INT 130' INT
+  trap 'handle_loop_signal TERM 143' TERM
+  trap 'handle_loop_signal HUP 129' HUP
 
   SCHEMA_FILE="$TOOL_ROOT/.agents/reviewer-output.schema.json"
   [[ -f "$SCHEMA_FILE" ]] || die "reviewer schema not found: $SCHEMA_FILE"

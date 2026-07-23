@@ -53,8 +53,25 @@ def _systemd_path(path: Path | str) -> str:
 
 
 def _systemd_quoted(path: Path | str) -> str:
-    value = _systemd_path(path).replace("\\", "\\\\").replace('"', '\\"')
+    value = _systemd_path(path)
+    return _systemd_quote_value(value)
+
+
+def _systemd_quote_value(value: str) -> str:
+    value = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{value}"'
+
+
+def _systemd_word(path: Path | str) -> str:
+    """Escape one unquoted systemd word (needed after EnvironmentFile's '-' prefix)."""
+    value = _systemd_path(path)
+    escaped: list[str] = []
+    for char in value:
+        if char.isspace() or char in {'\\', '"', "'"}:
+            escaped.extend(f"\\x{byte:02x}" for byte in char.encode("utf-8"))
+        else:
+            escaped.append(char)
+    return "".join(escaped)
 
 
 def render_systemd_unit(
@@ -69,11 +86,11 @@ def render_systemd_unit(
         "@TOOL_ROOT@": _systemd_path(tool),
         "@BRIDGE_SCRIPT@": _systemd_quoted(tool / "scripts" / "agents" / "telegram_bridge.py"),
         "@STATE_ROOT@": _systemd_quoted(state_root),
-        "@CREDENTIALS_FILE@": _systemd_path(credentials_file),
+        "@CREDENTIALS_FILE@": f"-{_systemd_word(credentials_file)}",
     }
     text = Path(template).read_text(encoding="utf-8")
     for marker, value in values.items():
         text = text.replace(marker, value)
-    if "@" in text:
+    if re.search(r"@[A-Z_]+@", text):
         raise PathConfigError("unresolved marker in systemd template")
     return text

@@ -689,3 +689,51 @@ def test_project_state_id_disambiguates_same_names_and_resolves_symlinks(
     second = resolve(repos[1])
     assert first != second
     assert resolve(alias) == first
+
+
+def test_signal_handler_blocks_active_run_and_preserves_worktree(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    worktree = tmp_path / "worktree"
+    run_dir.mkdir()
+    worktree.mkdir()
+    (run_dir / "status").write_text("REVIEWING\n", encoding="utf-8")
+    fake_dx = tmp_path / "fake-dx"
+    fake_dx.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -euo pipefail
+            [[ "$1" == "notify-blocked" ]]
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --run-dir) run_dir="$2"; shift 2 ;;
+                *) shift ;;
+              esac
+            done
+            printf '%s\n' notified > "$run_dir/signal-notified"
+            """
+        ),
+        encoding="utf-8",
+    )
+    fake_dx.chmod(fake_dx.stat().st_mode | stat.S_IXUSR)
+    harness = textwrap.dedent(
+        f"""\
+        set -euo pipefail
+        RUN_DIR={str(run_dir)!r}
+        WORKTREE={str(worktree)!r}
+        AGENT_DX_CLI={str(fake_dx)!r}
+        source {str(AGENTS / "run_task.sh")!r}
+        handle_loop_signal TERM 143
+        """
+    )
+    completed = subprocess.run(
+        ["bash", "-c", harness],
+        cwd=str(REPO_ROOT),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 143
+    assert (run_dir / "status").read_text(encoding="utf-8").strip() == "BLOCKED"
+    assert (run_dir / "signal-notified").is_file()
+    assert worktree.is_dir()

@@ -1,31 +1,78 @@
 # Codex Cursor Agent Loop
 
-Snapshot externo da ferramenta de orquestração extraída do projeto
-`new_chatbot`.
+Runner externo para executar uma task com Cursor Agent, revisar o resultado com
+Codex e exigir aprovação humana auditável pelo Telegram.
 
-## Estado
+O runner não faz commit, push, merge, deploy, limpeza destrutiva nem inicia a
+próxima task.
 
-- implementação DX-01 aprovada;
-- 48 testes focados aprovados;
-- gate humano via Telegram, sem shell remoto;
-- nenhuma automação de commit, merge, push, deploy ou próxima task.
+## Preparação
 
-Este diretório preserva a implementação e seus testes antes da generalização.
-Ele ainda contém acoplamentos ao layout original e não deve ser considerado
-instalador universal até a conclusão da etapa AG-01 descrita em
-`MIGRATION_NOTES.md`.
+O runtime usa apenas Python 3 e ferramentas do sistema. `pytest` é necessário
+somente para desenvolvimento:
 
-## Conteúdo
+```bash
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
+```
 
-- `scripts/agents/`: loop, revisão local e ponte Telegram;
-- `.agents/reviewer-output.schema.json`: contrato do revisor;
-- `tests/unit/test_agent_*.py`: suíte focada;
-- `docs/AGENT_ORCHESTRATION.md`: operação atual;
-- `docs/tasks/DX-01.md`: especificação aprovada;
-- `archive/`: runs antigos preservados fora do chatbot.
+Também são necessários `git`, `flock`, Cursor Agent e Codex CLI autenticados.
 
-## Próximo objetivo
+## Uso externo
 
-Transformar a ferramenta em um runner instalado externamente que recebe
-`--repo /caminho/do/projeto`, mantém estado fora do repositório-alvo e usa
-configuração por projeto.
+O projeto-alvo não recebe scripts nem estado do runner:
+
+```bash
+./agent-loop run --repo /caminho/do/projeto docs/tasks/CP-00.md 3 main
+./agent-loop review --repo /caminho/do/projeto docs/tasks/CP-00.md
+```
+
+Por padrão, runs e worktrees ficam em:
+
+```text
+$XDG_STATE_HOME/codex-cursor-agent-loop/projects/<nome-hash>/
+```
+
+Sem `XDG_STATE_HOME`, usa `~/.local/state`. `--state-root` permite outro local.
+O identificador inclui o caminho canônico do Git, isolando repositórios com o
+mesmo nome e aliases por symlink.
+
+## Gate humano
+
+Configure token e IDs numéricos fora do Git conforme
+[`docs/AGENT_ORCHESTRATION.md`](docs/AGENT_ORCHESTRATION.md), então execute:
+
+```bash
+./agent-loop serve
+```
+
+Uma única ponte descobre runs de múltiplos projetos no state root. Depois de
+`HUMAN_APPROVED`, valide decisão e snapshot imediatamente antes da integração:
+
+```bash
+./agent-loop verify --run-dir /caminho/externo/para/o/run
+```
+
+O comando falha se não houver decisão humana válida ou se o worktree divergir
+do hash revisado.
+
+## systemd --user
+
+Gere a unidade com os caminhos reais da instalação:
+
+```bash
+./agent-loop systemd-unit \
+  --output ~/.config/systemd/user/agent-telegram-bridge.service
+systemd-analyze verify ~/.config/systemd/user/agent-telegram-bridge.service
+```
+
+O comando apenas gera o arquivo; não habilita nem inicia o serviço.
+
+## Estrutura
+
+- `agent-loop`: CLI externa (`run`, `review`, `serve`, `verify`, `systemd-unit`);
+- `scripts/agents/`: executor, revisor e ponte Telegram;
+- `scripts/agents/dx/`: estado, hash, concorrência e cliente Bot API;
+- `.agents/reviewer-output.schema.json`: contrato de saída do revisor;
+- `tests/unit/`: suíte focada;
+- `archive/`: evidências históricas, ignoradas pelo Git.
