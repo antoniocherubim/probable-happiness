@@ -30,6 +30,9 @@ allocate_exclusive_run_dir() {
   mkdir -p "$runs_root"
   while ! mkdir "$candidate" 2>/dev/null; do
     suffix=$((suffix + 1))
+    if [[ "$suffix" -gt 10000 ]]; then
+      die "failed to allocate exclusive run directory under $runs_root"
+    fi
     candidate="$runs_root/${task_slug}-current-review-${stamp}-${suffix}"
   done
   printf '%s\n' "$candidate"

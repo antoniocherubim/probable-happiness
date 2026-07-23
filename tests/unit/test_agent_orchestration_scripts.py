@@ -737,3 +737,61 @@ def test_signal_handler_blocks_active_run_and_preserves_worktree(tmp_path: Path)
     assert (run_dir / "status").read_text(encoding="utf-8").strip() == "BLOCKED"
     assert (run_dir / "signal-notified").is_file()
     assert worktree.is_dir()
+
+
+def test_external_review_detects_untracked_mode_change(tmp_path: Path) -> None:
+    repo = tmp_path / "review target"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "agent@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Agent Test"], cwd=repo, check=True)
+    task = repo / "docs" / "tasks" / "AG-01.md"
+    task.parent.mkdir(parents=True)
+    task.write_text("# AG-01\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "task"], cwd=repo, check=True, capture_output=True)
+    untracked = repo / "new-file.sh"
+    untracked.write_text("echo ok\n", encoding="utf-8")
+
+    codex = tmp_path / "codex"
+    codex.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -euo pipefail
+            checkout=""
+            output=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                -C) checkout="$2"; shift 2 ;;
+                --output-last-message) output="$2"; shift 2 ;;
+                *) shift ;;
+              esac
+            done
+            chmod +x "$checkout/new-file.sh"
+            printf '%s\n' '{"status":"APPROVED","summary":"ok","findings":[],"tests_required":[]}' > "$output"
+            """
+        ),
+        encoding="utf-8",
+    )
+    codex.chmod(codex.stat().st_mode | stat.S_IXUSR)
+
+    completed = subprocess.run(
+        [
+            str(REPO_ROOT / "agent-loop"),
+            "review",
+            "--repo",
+            str(repo),
+            "--state-root",
+            str(tmp_path / "state"),
+            "docs/tasks/AG-01.md",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CODEX_BIN": str(codex)},
+    )
+    assert completed.returncode == 1
+    assert "reviewer changed repository files" in completed.stderr
+    assert untracked.stat().st_mode & stat.S_IXUSR
+    assert not (repo / ".agents").exists()
