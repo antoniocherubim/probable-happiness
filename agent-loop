@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TOOL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+if [[ -n "${AGENT_LOOP_PYTHON:-}" ]]; then
+  PYTHON_BIN="$AGENT_LOOP_PYTHON"
+elif [[ -x "$TOOL_ROOT/venv/bin/python" ]]; then
+  PYTHON_BIN="$TOOL_ROOT/venv/bin/python"
+else
+  PYTHON_BIN="python3"
+fi
+DX_CLI="$TOOL_ROOT/scripts/agents/telegram_bridge.py"
+
+usage() {
+  printf '%s\n' \
+    "Usage:" \
+    "  agent-loop run --repo <path> [--state-root <path>] <task-file> [max-iterations] [base-ref]" \
+    "  agent-loop review --repo <path> [--state-root <path>] [review options] <task-file>" \
+    "  agent-loop serve [--state-root <path>]" \
+    "  agent-loop verify --run-dir <path>" \
+    "  agent-loop systemd-unit [--state-root <path>] [--credentials-file <path>] [--output <path>]"
+}
+
+die() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 2
+}
+
+resolve_project_state() {
+  local repo="$1"
+  local state_root="${2:-}"
+  local args=(project-state-dir --repo "$repo")
+  if [[ -n "$state_root" ]]; then
+    args+=(--state-root "$state_root")
+  fi
+  "$PYTHON_BIN" "$DX_CLI" "${args[@]}"
+}
+
+run_or_review() {
+  local command="$1"
+  shift
+  local repo=""
+  local state_root=""
+  local forwarded=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --repo)
+        [[ $# -ge 2 ]] || die "--repo requires a path"
+        repo="$2"
+        shift 2
+        ;;
+      --state-root)
+        [[ $# -ge 2 ]] || die "--state-root requires a path"
+        state_root="$2"
+        shift 2
+        ;;
+      *)
+        forwarded+=("$1")
+        shift
+        ;;
+    esac
+  done
+  [[ -n "$repo" ]] || die "$command requires --repo"
+  [[ ${#forwarded[@]} -gt 0 ]] || die "$command requires a task file"
+
+  export AGENT_LOOP_TOOL_ROOT="$TOOL_ROOT"
+  export AGENT_LOOP_TARGET_REPO="$repo"
+  export AGENT_LOOP_STATE_ROOT
+  AGENT_LOOP_STATE_ROOT="$(resolve_project_state "$repo" "$state_root")"
+
+  if [[ "$command" == "run" ]]; then
+    exec bash "$TOOL_ROOT/scripts/agents/run_task.sh" "${forwarded[@]}"
+  fi
+  exec bash "$TOOL_ROOT/scripts/agents/review_current.sh" "${forwarded[@]}"
+}
+
+[[ $# -ge 1 ]] || {
+  usage
+  exit 2
+}
+
+COMMAND="$1"
+shift
+case "$COMMAND" in
+  run|review)
+    run_or_review "$COMMAND" "$@"
+    ;;
+  serve)
+    STATE_ROOT=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --state-root) [[ $# -ge 2 ]] || die "--state-root requires a path"; STATE_ROOT="$2"; shift 2 ;;
+        *) die "unknown serve option: $1" ;;
+      esac
+    done
+    if [[ -z "$STATE_ROOT" ]]; then
+      STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/codex-cursor-agent-loop"
+    fi
+    exec "$PYTHON_BIN" "$DX_CLI" serve --runs-root "$STATE_ROOT"
+    ;;
+  verify)
+    exec "$PYTHON_BIN" "$DX_CLI" verify-reviewed-snapshot "$@"
+    ;;
+  systemd-unit)
+    exec "$PYTHON_BIN" "$DX_CLI" render-systemd-unit --tool-root "$TOOL_ROOT" "$@"
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    usage >&2
+    die "unknown command: $COMMAND"
+    ;;
+esac

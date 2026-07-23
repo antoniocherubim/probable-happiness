@@ -1,0 +1,20 @@
+[Unit]
+Description=Codex Cursor agent-loop Telegram bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@TOOL_ROOT@
+EnvironmentFile=-@CREDENTIALS_FILE@
+ExecStart=/usr/bin/python3 @BRIDGE_SCRIPT@ serve --runs-root @STATE_ROOT@
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@STATE_ROOT@
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
