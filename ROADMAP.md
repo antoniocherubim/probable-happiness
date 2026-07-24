@@ -31,7 +31,8 @@ quando configurado, publique apenas uma branch segura e auditável.
 - [x] DX-02: perfil por projeto, bootstrap, timeout, heartbeat e retomada;
 - [x] DX-03: resumo técnico, documentação obrigatória e delivery opt-in;
 - [x] DX-04: extensão explícita e auditável do orçamento de iterações;
-- [x] suíte local com 122 testes determinísticos;
+- [x] DX-05: aprovação assíncrona e fila `delivery-job.json` (worker foreground);
+- [x] suíte local com testes determinísticos;
 - [x] push sem force, sem merge e com confirmação do OID remoto.
 
 ## Ordem de entrega
@@ -47,9 +48,10 @@ quando configurado, publique apenas uma branch segura e auditável.
 | M6 | P1 | Operação e documentação para terceiros | M4–M5 |
 | M7 | Gate | Alpha externa, beta pública e release estável | M0–M6 |
 
-Próxima entrega recomendada: **DX-05 / M0 — worker seguro de delivery**. Ela
-remove simultaneamente o bloqueio funcional da unidade systemd, a exposição do
-token Telegram a subprocessos Git e o push síncrono dentro do callback.
+Próxima entrega recomendada: **DX-06 / M0 — worker Git endurecido e unidades
+systemd**. A DX-05 já removeu Git do callback e enfileira `delivery-job.json`;
+a DX-06 fecha a fronteira operacional (env mínimo, hooks off, unidade
+separada sem token Telegram).
 
 ### Tasks preparadas até M2
 
@@ -71,8 +73,8 @@ Tasks: [DX-05](docs/tasks/DX-05.md) e [DX-06](docs/tasks/DX-06.md).
 
 ### Trabalho
 
-- [ ] fazer a bridge registrar aprovação e enfileirar um job de delivery durável;
-- [ ] responder ao callback imediatamente, sem aguardar rede ou `git push`;
+- [x] fazer a bridge registrar aprovação e enfileirar um job de delivery durável;
+- [x] responder ao callback imediatamente, sem aguardar rede ou `git push`;
 - [ ] criar worker separado, sem `AGENT_TELEGRAM_BOT_TOKEN`;
 - [ ] usar ambiente Git allowlisted e remover variáveis `AGENT_*`, `GIT_*` não
   autorizadas, askpass e prompts interativos;
@@ -81,8 +83,8 @@ Tasks: [DX-05](docs/tasks/DX-05.md) e [DX-06](docs/tasks/DX-06.md).
 - [ ] conceder ao worker escrita somente no Git common dir e no state root do
   projeto selecionado;
 - [ ] gerar unidades systemd distintas para bridge e worker;
-- [ ] validar remote, branch, decisão, estado e snapshot novamente no worker;
-- [ ] manter idempotência quando o commit ou remote OID já existir.
+- [x] validar remote, branch, decisão, estado e snapshot novamente no worker;
+- [x] manter idempotência quando o commit ou remote OID já existir.
 
 ### Critérios de saída
 

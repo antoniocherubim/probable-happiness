@@ -404,9 +404,15 @@ def test_authenticated_callback_delivers_configured_branch(tmp_path: Path) -> No
         data=env["request"]["callback_token"],
     )
     assert bridge.process_updates_once() == 1
-    assert read_status(env["run_dir"]) == STATUS_PUSHED
+    assert read_status(env["run_dir"]) == STATUS_HUMAN_APPROVED
+    assert (env["run_dir"] / "delivery-job.json").is_file()
+    assert remote_ref(env["remote"], "cp-00") is None
+    assert fake.answered_callbacks[-1]["text"] == "Aprovado; entrega enfileirada."
+    from dx.delivery_job import process_delivery_run
+
+    result = process_delivery_run(env["run_dir"])
+    assert result["status"] == STATUS_PUSHED
     assert remote_ref(env["remote"], "cp-00") is not None
-    assert fake.answered_callbacks[-1]["text"] == "Aprovado e branch publicada."
 
 
 def test_delivery_creates_exact_single_commit_branch_without_changing_main(tmp_path: Path) -> None:

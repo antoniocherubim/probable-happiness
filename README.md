@@ -76,15 +76,20 @@ decisão e snapshot manualmente:
 O comando falha se não houver decisão humana válida ou se o worktree divergir
 do hash revisado.
 
-Com entrega habilitada, a aprovação transiciona por `DELIVERING` até `PUSHED`.
-Uma falha preserva aprovação e worktree em `DELIVERY_FAILED`; quando o commit já
-foi criado e registrado, ele também é reutilizado pela retomada:
+Com entrega habilitada, a aprovação publica um `delivery-job.json` pendente e
+responde imediatamente ao Telegram. Um worker separado conclui
+`DELIVERING` → `PUSHED`. Sem worker ativo o run permanece aprovado e pendente,
+nunca falsamente `PUSHED`. Uma falha preserva aprovação e worktree em
+`DELIVERY_FAILED`; quando o commit já foi criado e registrado, ele também é
+reutilizado pela retomada:
 
 ```bash
+./agent-loop delivery-worker --run-dir /caminho/externo/para/o/run --once
 ./agent-loop resume --run-dir /caminho/externo/para/o/run
 ```
 
-A retomada repete somente a entrega; Cursor e Codex não executam novamente.
+A retomada assegura o job e processa a entrega em one-shot; Cursor e Codex não
+executam novamente.
 
 ## Extensão explícita de iterações
 
@@ -118,20 +123,18 @@ systemd-analyze verify ~/.config/systemd/user/agent-telegram-bridge.service
 O comando apenas gera o arquivo; não habilita nem inicia o serviço.
 
 > **Limitação atual:** a unidade endurecida libera escrita somente no state root,
-> mas a entrega em branch precisa gravar objetos e refs no repositório Git. A
-> ponte instalada por essa unidade é adequada para notificações e aprovação; uma
-> entrega pendente deve ser concluída pelo runner ainda ativo ou por
-> `agent-loop resume` fora da unidade. Não amplie `ReadWritePaths` de forma
-> genérica. Além disso, o `EnvironmentFile` coloca o token do Telegram no ambiente
-> da ponte, e subprocessos Git/hook locais podem herdá-lo. Não use
-> `push_branch` com hooks ou `core.hooksPath` não confiáveis até a entrega ser
-> separada em um worker sem a credencial do bot.
+> enquanto delivery precisa escrever no Git common dir. Após DX-05 a bridge só
+> enfileira o job; execute `agent-loop delivery-worker` (ou `resume`) fora da
+> unidade da bridge. Não amplie `ReadWritePaths` de forma genérica. O
+> `EnvironmentFile` ainda coloca o token do Telegram no ambiente da ponte —
+> hardening do worker e unidade dedicada sem o token estão na DX-06. Não use
+> `push_branch` com hooks ou `core.hooksPath` não confiáveis até essa separação.
 
 ## Estrutura
 
-- `agent-loop`: CLI externa (`run`, `review`, `resume`, `evidence`, `serve`, `verify`, `systemd-unit`);
+- `agent-loop`: CLI externa (`run`, `review`, `resume`, `evidence`, `serve`, `verify`, `delivery-worker`, `systemd-unit`);
 - `scripts/agents/`: executor, revisor e ponte Telegram;
-- `scripts/agents/dx/`: estado, hash, concorrência e cliente Bot API;
+- `scripts/agents/dx/`: estado, hash, concorrência, fila de delivery e cliente Bot API;
 - `.agents/reviewer-output.schema.json`: contrato de saída do revisor;
 - `tests/unit/`: suíte focada;
 - `ROADMAP.md`: marcos e gates para uso confiável por terceiros;

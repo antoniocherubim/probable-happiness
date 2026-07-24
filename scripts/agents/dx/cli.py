@@ -24,6 +24,13 @@ from .approval import (
 from .bridge import Bridge, build_awaiting_summary, build_blocked_summary
 from .config import ConfigError, human_approval_timeout_sec, load_bridge_config
 from .delivery import DeliveryError, deliver_run, freeze_delivery_config
+from .delivery_job import (
+    DeliveryJobError,
+    ensure_delivery_job,
+    process_delivery_run,
+    project_state_from_run_dir,
+    run_delivery_worker,
+)
 from .atomic import atomic_write_json
 from .paths import (
     PathConfigError,
@@ -534,6 +541,7 @@ def cmd_prepare_review_artifacts(args: argparse.Namespace) -> int:
 
 
 def cmd_deliver_run(args: argparse.Namespace) -> int:
+    """Internal transition helper; prefer delivery-worker for supported paths."""
     try:
         result = deliver_run(Path(args.run_dir))
     except DeliveryError as exc:
@@ -541,6 +549,57 @@ def cmd_deliver_run(args: argparse.Namespace) -> int:
         return 1
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
+
+
+def cmd_ensure_delivery_job(args: argparse.Namespace) -> int:
+    try:
+        result = ensure_delivery_job(Path(args.run_dir))
+    except (DeliveryJobError, OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    if result.get("result") == "blocked_divergent":
+        print(f"ERROR: {result.get('reason') or 'delivery-job divergent'}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    return 0
+
+
+def cmd_delivery_worker(args: argparse.Namespace) -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[delivery-worker] %(levelname)s %(message)s",
+    )
+    run_dir = Path(args.run_dir).expanduser().resolve() if args.run_dir else None
+    if args.project_state:
+        project_state = Path(args.project_state).expanduser().resolve()
+    elif run_dir is not None:
+        project_state = project_state_from_run_dir(run_dir)
+    else:
+        print("ERROR: delivery-worker requires --project-state or --run-dir", file=sys.stderr)
+        return 2
+    try:
+        if run_dir is not None and args.once:
+            ensure_delivery_job(run_dir)
+            outcome = process_delivery_run(run_dir)
+            print(json.dumps(outcome, indent=2, sort_keys=True, default=str))
+            return 0
+        result = run_delivery_worker(
+            project_state,
+            once=args.once,
+            run_dir=run_dir,
+            max_cycles=args.max_cycles,
+            poll_interval=args.poll_interval,
+        )
+    except (DeliveryError, DeliveryJobError, OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    failures = [
+        item
+        for item in result.get("processed", [])
+        if isinstance(item, dict) and not item.get("ok", True)
+    ]
+    return 1 if failures else 0
 
 
 def cmd_review_status(args: argparse.Namespace) -> int:
@@ -797,6 +856,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--run-dir", required=True)
     p.set_defaults(func=cmd_deliver_run)
+
+    p = sub.add_parser(
+        "ensure-delivery-job",
+        help="Create or validate the immutable delivery-job.json for an approved run",
+    )
+    p.add_argument("--run-dir", required=True)
+    p.set_defaults(func=cmd_ensure_delivery_job)
+
+    p = sub.add_parser(
+        "delivery-worker",
+        help="Process queued delivery jobs for a project state (no Telegram token required)",
+    )
+    p.add_argument("--project-state", default=None)
+    p.add_argument("--run-dir", default=None, help="Process a single run (implies derived project state)")
+    p.add_argument("--once", action="store_true", help="Process current jobs once and exit")
+    p.add_argument("--max-cycles", type=int, default=None, help="Stop continuous mode after N cycles")
+    p.add_argument("--poll-interval", type=float, default=2.0)
+    p.set_defaults(func=cmd_delivery_worker)
 
     p = sub.add_parser("review-status", help="Validate a complete reviewer JSON report")
     p.add_argument("--file", required=True)

@@ -506,6 +506,7 @@ def _idempotent_replay_locked(
         STATUS_DELIVERY_FAILED,
     }:
         write_status(run_dir, STATUS_HUMAN_APPROVED)
+    _enqueue_delivery_job_after_approval_locked(run_dir)
     return "idempotent_replay", existing
 
 
@@ -577,7 +578,19 @@ def _claim_human_approval_locked(
         return "rejected_wrong_state", existing or {}
 
     write_status(run_dir, STATUS_HUMAN_APPROVED)
+    _enqueue_delivery_job_after_approval_locked(run_dir)
     return "accepted", decision
+
+
+def _enqueue_delivery_job_after_approval_locked(run_dir: Path) -> None:
+    """Best-effort job enqueue under the held approval lock (push_branch only)."""
+    from .delivery_job import ensure_delivery_job
+
+    try:
+        ensure_delivery_job(run_dir, approval_lock_held=True)
+    except Exception:
+        # Decision/status already published; reconcile on resume/worker.
+        pass
 
 
 def apply_human_approval(
@@ -698,6 +711,7 @@ def _decision_ready_locked(run_dir: Path) -> bool:
         STATUS_DELIVERY_FAILED,
     }:
         write_status(run_dir, STATUS_HUMAN_APPROVED)
+    _enqueue_delivery_job_after_approval_locked(run_dir)
     return True
 
 

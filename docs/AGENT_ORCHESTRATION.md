@@ -164,17 +164,19 @@ liberação de escrita somente para o state root.
 
 ### Limitação da entrega na unidade atual
 
-O mesmo hardening que protege o host impede a ponte de gravar objetos e refs no
-repositório Git, como exigido por `push_branch`. Portanto, uma aprovação tardia
-processada somente pela unidade pode terminar em `DELIVERY_FAILED`. Conclua a
-entrega pelo runner ainda ativo ou execute `agent-loop resume` fora da unidade.
-Não libere toda a home ou todos os repositórios em `ReadWritePaths`.
+Após DX-05 a ponte apenas registra a decisão e enfileira `delivery-job.json`;
+ela não executa Git. Conclua a entrega com:
 
-O `EnvironmentFile` também coloca o token do bot no ambiente da ponte. Como a
-implementação atual inicia Git no processo da ponte, hooks como `pre-push` ou um
-`core.hooksPath` local podem herdar esse ambiente. Até existir um worker de
-entrega separado, sem o token Telegram e com ambiente Git mínimo, habilite
-`push_branch` somente em repositórios e hooks confiáveis.
+```bash
+./agent-loop delivery-worker --run-dir /state/projects/<repo-id>/runs/<run> --once
+# ou
+./agent-loop resume --run-dir /state/projects/<repo-id>/runs/<run>
+```
+
+A unidade da bridge continua sem escrita no repositório. O `EnvironmentFile`
+ainda coloca o token do bot no ambiente da ponte; a DX-06 introduz a unidade do
+worker sem esse token, com ambiente Git mínimo e hooks desabilitados. Até lá,
+habilite `push_branch` somente em repositórios e hooks confiáveis.
 
 ## Estados e falhas
 
@@ -183,9 +185,11 @@ entrega separado, sem o token Telegram e com ambiente Git mínimo, habilite
 - `CHANGES_REQUESTED`: feedback retornará ao Cursor;
 - `APPROVED`: aceite técnico, nunca humano;
 - `AWAITING_HUMAN_APPROVAL`: botão pendente;
-- `HUMAN_APPROVED`: decisão autenticada para o hash revisado;
-- `DELIVERING`: manifesto validado e entrega em andamento;
-- `DELIVERY_FAILED`: aprovação preservada; `resume` repete somente a entrega;
+- `HUMAN_APPROVED`: decisão autenticada para o hash revisado; com
+  `push_branch`, publica `delivery-job.json` pendente;
+- `DELIVERING`: worker validou job/manifesto e entrega em andamento;
+- `DELIVERY_FAILED`: aprovação preservada; `delivery-worker`/`resume` repetem
+  somente a entrega;
 - `PUSHED`: commit e OID remoto confirmados; terminal com delivery;
 - `BLOCKED`: falha, interrupção, dependência externa ou limite atingido.
 
@@ -210,10 +214,12 @@ APPROVED → AWAITING_HUMAN_APPROVAL
                     ├─ Rejeitar → BLOCKED
                     └─ Aprovar  → HUMAN_APPROVED
                                       ├─ delivery=none → terminal
-                                      └─ push_branch → DELIVERING
-                                                          ├─ sucesso → PUSHED
-                                                          └─ falha → DELIVERY_FAILED
-                                                                       └─ resume → DELIVERING
+                                      └─ push_branch → delivery-job.json (pending)
+                                                          └─ delivery-worker
+                                                               → DELIVERING
+                                                                   ├─ sucesso → PUSHED
+                                                                   └─ falha → DELIVERY_FAILED
+                                                                                └─ resume/worker → DELIVERING
 
 CHANGES_REQUESTED em N = limite
   → BLOCKED/max_review_iterations

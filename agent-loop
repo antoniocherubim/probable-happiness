@@ -21,6 +21,8 @@ usage() {
     "  agent-loop profile --repo <path>" \
     "  agent-loop serve [--state-root <path>]" \
     "  agent-loop verify --run-dir <path>" \
+    "  agent-loop delivery-worker --project-state <dir> [--once]" \
+    "  agent-loop delivery-worker --run-dir <path> --once" \
     "  agent-loop systemd-unit [--state-root <path>] [--credentials-file <path>] [--output <path>]"
 }
 
@@ -154,6 +156,9 @@ case "$COMMAND" in
     ;;
   verify)
     exec "$PYTHON_BIN" "$DX_CLI" verify-reviewed-snapshot "$@"
+    ;;
+  delivery-worker)
+    exec "$PYTHON_BIN" "$DX_CLI" delivery-worker "$@"
     ;;
   systemd-unit)
     exec "$PYTHON_BIN" "$DX_CLI" render-systemd-unit --tool-root "$TOOL_ROOT" "$@"

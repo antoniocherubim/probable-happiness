@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.agent-loop/schemas/delivery-job.schema.json",
+  "title": "delivery-job",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "job_id",
+    "run_id",
+    "reviewed_diff_hash",
+    "decision_content_hash",
+    "remote",
+    "branch",
+    "created_at",
+    "status"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "job_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 of run_id + decision_content_hash + reviewed_diff_hash + remote + branch"
+    },
+    "run_id": { "type": "string", "minLength": 1 },
+    "reviewed_diff_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "decision_content_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 of canonical decision fields excluding callback_token"
+    },
+    "remote": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Frozen remote name only; never a URL"
+    },
+    "branch": { "type": "string", "minLength": 1 },
+    "created_at": { "type": "string", "minLength": 1 },
+    "status": { "const": "pending" }
+  }
+}

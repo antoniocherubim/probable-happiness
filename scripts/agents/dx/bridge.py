@@ -17,7 +17,7 @@ from .approval import (
     truncate_message,
 )
 from .config import BridgeConfig
-from .delivery import DeliveryError, deliver_run
+from .delivery_job import callback_delivery_message, ensure_delivery_job
 from .telegram import TelegramClient, TelegramError
 
 logger = logging.getLogger("agent_dx.bridge")
@@ -244,23 +244,12 @@ class Bridge:
         )
 
         if result in {"accepted", "idempotent_replay"}:
+            # Ensure job under approval semantics; never call Git from the bridge.
             try:
-                metadata = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError):
-                metadata = {}
-            frozen_delivery = metadata.get("delivery")
-            if not isinstance(frozen_delivery, dict) or frozen_delivery.get("mode") != "push_branch":
-                answer("Approved.")
-                return
-            try:
-                delivery = deliver_run(run_dir)
-            except DeliveryError:
-                answer("Aprovado, mas a publicação da branch falhou.")
-                return
-            if delivery.get("status") == "PUSHED":
-                answer("Aprovado e branch publicada.")
-            else:
-                answer("Approved.")
+                ensure_delivery_job(run_dir)
+            except Exception as exc:
+                logger.warning("delivery job ensure failed for %s: %s", run_dir.name, exc)
+            answer(callback_delivery_message(run_dir))
             return
         if result == "rejected_unauthorized":
             answer(NEUTRAL_UNAUTHORIZED)

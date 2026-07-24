@@ -180,7 +180,7 @@ await_human_approval() {
   # helper so a concurrent claim cannot be downgraded by a non-atomic shell write.
   if [[ "$wait_rc" -eq 0 ]]; then
     CURRENT_PHASE="delivery"
-    if [[ -f "$RUN_DIR/run.json" ]] && ! DX_CLI deliver-run --run-dir "$RUN_DIR" >/dev/null; then
+    if [[ -f "$RUN_DIR/run.json" ]] && ! DX_CLI delivery-worker --run-dir "$RUN_DIR" --once >/dev/null; then
       note "human approval was preserved, but automatic branch delivery failed"
       note "resume only the delivery with: agent-loop resume --run-dir $RUN_DIR"
       exit 1
@@ -325,7 +325,7 @@ _run_task_entry() {
   fi
   if [[ -n "$RESUME_RUN_DIR" && "$START_PHASE" == "delivery" ]]; then
     note "resuming only the approved branch delivery; Cursor and Codex will not run"
-    DX_CLI deliver-run --run-dir "$RUN_DIR" >/dev/null || \
+    DX_CLI delivery-worker --run-dir "$RUN_DIR" --once >/dev/null || \
       die "delivery failed again; approval and worktree were preserved"
     note "approved branch delivery completed"
     exit 0
@@ -337,7 +337,7 @@ _run_task_entry() {
     WAIT_EXIT=$?
     set -e
     if [[ "$WAIT_EXIT" -eq 0 ]]; then
-      DX_CLI deliver-run --run-dir "$RUN_DIR" >/dev/null || \
+      DX_CLI delivery-worker --run-dir "$RUN_DIR" --once >/dev/null || \
         die "human approval is preserved, but branch delivery failed"
       note "human approval and configured delivery completed"
       exit 0

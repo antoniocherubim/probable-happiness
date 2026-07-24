@@ -124,12 +124,13 @@ BLOCKED + --review-only -> nova revisão do snapshot atual
 BLOCKED/max_review_iterations + orçamento explícito -> executor em N+1
 AWAITING_HUMAN_APPROVAL -> apenas retoma wait-decision
 HUMAN_APPROVED          -> valida decisão/hash; não repete gate
-HUMAN_APPROVED + delivery -> DELIVERING -> PUSHED
-DELIVERING/DELIVERY_FAILED -> retoma somente delivery
+HUMAN_APPROVED + delivery -> assegura delivery-job.json → worker → DELIVERING → PUSHED
+DELIVERING/DELIVERY_FAILED -> retoma somente delivery via delivery-worker
 PUSHED                  -> terminal; não repete push
 ```
 
 ```bash
+./agent-loop delivery-worker --run-dir /state/projects/<repo-id>/runs/<run-id> --once
 ./agent-loop resume --run-dir /state/projects/<repo-id>/runs/<run-id>
 ./agent-loop resume --run-dir /state/projects/<repo-id>/runs/<run-id> --review-only
 ./agent-loop resume --run-dir /state/projects/<repo-id>/runs/<run-id> \
