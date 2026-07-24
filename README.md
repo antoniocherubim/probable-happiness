@@ -9,6 +9,10 @@ heartbeat, validações, documentação obrigatória e entrega opt-in em branch 
 podem ser retomados sem descartar o worktree, e evidência complementar permanece
 não confiável até nova revisão. Veja [Perfil e retomada segura](docs/PROJECT_PROFILE.md).
 
+O projeto ainda está em estágio pré-alpha. O caminho até uma distribuição
+confiável para terceiros, com gates objetivos de segurança, CI, empacotamento e
+release, está no [roadmap](ROADMAP.md).
+
 Por padrão o runner não faz commit nem push. Quando o projeto habilita
 explicitamente `delivery.mode = "push_branch"`, ele cria um único commit do
 snapshot aprovado e envia somente a branch congelada. Nunca faz merge, push em
@@ -130,4 +134,5 @@ O comando apenas gera o arquivo; não habilita nem inicia o serviço.
 - `scripts/agents/dx/`: estado, hash, concorrência e cliente Bot API;
 - `.agents/reviewer-output.schema.json`: contrato de saída do revisor;
 - `tests/unit/`: suíte focada;
+- `ROADMAP.md`: marcos e gates para uso confiável por terceiros;
 - `archive/`: evidências históricas, ignoradas pelo Git.

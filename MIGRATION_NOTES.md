@@ -15,6 +15,9 @@
 
 ## Trabalho futuro
 
+O plano canônico, com dependências e critérios de saída, está em
+[`ROADMAP.md`](ROADMAP.md). Em resumo:
+
 - empacotar uma distribuição instalável com entrypoint no `PATH`;
 - versionar migrações do schema de `.agent-loop/project.toml` e de runs antigos;
 - separar delivery em worker sem credencial Telegram e com ambiente Git mínimo;
