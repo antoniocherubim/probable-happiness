@@ -7,7 +7,7 @@ task versionada
   → worktree externo isolado
   → Cursor executa
   → Codex revisa diff, aceite e testes
-  → CHANGES_REQUESTED retorna ao Cursor (máximo de 1 a 5 ciclos)
+  → CHANGES_REQUESTED retorna ao Cursor (orçamento inicial de 1 a 5 ciclos)
   → APPROVED técnico
   → AWAITING_HUMAN_APPROVAL
   → HUMAN_APPROVED para o hash revisado
@@ -83,8 +83,9 @@ congela o worktree. Antes de integrar:
 ./agent-loop verify --run-dir /state/projects/<repo-id>/runs/<run-id>
 ```
 
-A verificação retorna sucesso somente quando há uma decisão humana válida,
-status `HUMAN_APPROVED` e o hash atual ainda coincide.
+A verificação retorna sucesso somente quando há uma decisão humana válida, o
+status está em `HUMAN_APPROVED`, `DELIVERING`, `DELIVERY_FAILED` ou `PUSHED` e o
+hash atual ainda coincide.
 
 ## Telegram
 
@@ -107,14 +108,19 @@ AGENT_TELEGRAM_CREDENTIALS_FILE=~/.config/codex-cursor-agent-loop/telegram.env \
 
 A ponte usa long polling, não abre porta pública e não aceita comandos de shell.
 Somente o `user_id` e `chat_id` numéricos allowlisted podem aprovar. Falha de
-rede nunca promove estado. Uma única ponte varre os runs de todos os projetos.
+rede nunca promove estado. Execute somente uma ponte por state root: ela varre
+os runs de todos os projetos, mas o processo ainda não possui trava global de
+instância.
 
 Ao abrir o gate, o Telegram recebe ID/título, repositório, base, iteração, hash,
 arquivos, estatísticas, executor, testes/validações, reviewer, findings, riscos
 e documentação — nunca o diff completo. Texto não usa `parse_mode`, URLs e
 atribuições sensíveis são redigidas e campos grandes são truncados
 explicitamente. Mensagens longas são numeradas; apenas a última tem botões.
-Cada `message_id` é persistido imediatamente para não reenviar partes concluídas.
+Cada `message_id` é persistido depois da resposta bem-sucedida do Telegram,
+reduzindo reenvios. A semântica permanece *at-least-once*: uma queda entre envio
+e persistência, reinício com offset apenas em memória ou duas pontes concorrentes
+pode duplicar updates ou mensagens.
 
 ```text
 (1/1)
@@ -155,6 +161,20 @@ systemctl --user daemon-reload
 
 O template aplica `NoNewPrivileges`, `ProtectSystem=strict`, home read-only e
 liberação de escrita somente para o state root.
+
+### Limitação da entrega na unidade atual
+
+O mesmo hardening que protege o host impede a ponte de gravar objetos e refs no
+repositório Git, como exigido por `push_branch`. Portanto, uma aprovação tardia
+processada somente pela unidade pode terminar em `DELIVERY_FAILED`. Conclua a
+entrega pelo runner ainda ativo ou execute `agent-loop resume` fora da unidade.
+Não libere toda a home ou todos os repositórios em `ReadWritePaths`.
+
+O `EnvironmentFile` também coloca o token do bot no ambiente da ponte. Como a
+implementação atual inicia Git no processo da ponte, hooks como `pre-push` ou um
+`core.hooksPath` local podem herdar esse ambiente. Até existir um worker de
+entrega separado, sem o token Telegram e com ambiente Git mínimo, habilite
+`push_branch` somente em repositórios e hooks confiáveis.
 
 ## Estados e falhas
 
@@ -212,9 +232,11 @@ branch. Falha dessa notificação não desfaz um push confirmado.
 
 ## Perfil, ambiente e retomada
 
-O contrato DX-02 está em [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md), incluindo
-schema TOML, bootstrap, ambiente externo `0600`, timeout por grupo de processos,
-heartbeat, `agent-loop resume` e `agent-loop evidence`.
+O contrato DX-02 está em [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md), com seu
+registro histórico em [`tasks/DX-02.md`](tasks/DX-02.md), incluindo schema TOML,
+bootstrap, ambiente externo `0600`, timeout por grupo de processos, heartbeat,
+`agent-loop resume` e `agent-loop evidence`. O delivery opt-in está registrado
+em [`tasks/DX-03.md`](tasks/DX-03.md).
 
 ## Limpeza
 

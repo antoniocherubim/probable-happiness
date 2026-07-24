@@ -16,8 +16,8 @@ snapshot aprovado e envia somente a branch congelada. Nunca faz merge, push em
 
 ## Preparação
 
-O runtime usa apenas Python 3 e ferramentas do sistema. `pytest` é necessário
-somente para desenvolvimento:
+O runtime requer Python 3.11 ou posterior e ferramentas do sistema. `pytest` é
+necessário somente para desenvolvimento:
 
 ```bash
 python3 -m venv venv
@@ -57,10 +57,13 @@ Configure token e IDs numéricos fora do Git conforme
 ./agent-loop serve
 ```
 
-Uma única ponte descobre runs de múltiplos projetos no state root. O Telegram
-envia o resumo técnico em partes numeradas; somente a última contém os botões
-**Aprovar e publicar branch** e **Rejeitar**. Depois de `HUMAN_APPROVED`,
-projetos sem entrega automática podem validar decisão e snapshot manualmente:
+Execute somente uma instância da ponte por state root; essa exclusividade ainda
+não é imposta pelo processo. A ponte descobre runs de múltiplos projetos. O
+Telegram envia o resumo técnico em partes numeradas; somente a última contém os
+botões **Aprovar e publicar branch** e **Rejeitar**. O texto do primeiro botão é
+fixo nesta versão: em projetos sem entrega automática ele registra apenas
+`HUMAN_APPROVED`, sem criar commit ou branch. Esses projetos podem validar
+decisão e snapshot manualmente:
 
 ```bash
 ./agent-loop verify --run-dir /caminho/externo/para/o/run
@@ -70,7 +73,8 @@ O comando falha se não houver decisão humana válida ou se o worktree divergir
 do hash revisado.
 
 Com entrega habilitada, a aprovação transiciona por `DELIVERING` até `PUSHED`.
-Uma falha preserva aprovação, worktree e commit local em `DELIVERY_FAILED`:
+Uma falha preserva aprovação e worktree em `DELIVERY_FAILED`; quando o commit já
+foi criado e registrado, ele também é reutilizado pela retomada:
 
 ```bash
 ./agent-loop resume --run-dir /caminho/externo/para/o/run
@@ -108,6 +112,16 @@ systemd-analyze verify ~/.config/systemd/user/agent-telegram-bridge.service
 ```
 
 O comando apenas gera o arquivo; não habilita nem inicia o serviço.
+
+> **Limitação atual:** a unidade endurecida libera escrita somente no state root,
+> mas a entrega em branch precisa gravar objetos e refs no repositório Git. A
+> ponte instalada por essa unidade é adequada para notificações e aprovação; uma
+> entrega pendente deve ser concluída pelo runner ainda ativo ou por
+> `agent-loop resume` fora da unidade. Não amplie `ReadWritePaths` de forma
+> genérica. Além disso, o `EnvironmentFile` coloca o token do Telegram no ambiente
+> da ponte, e subprocessos Git/hook locais podem herdá-lo. Não use
+> `push_branch` com hooks ou `core.hooksPath` não confiáveis até a entrega ser
+> separada em um worker sem a credencial do bot.
 
 ## Estrutura
 

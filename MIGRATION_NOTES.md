@@ -16,8 +16,11 @@
 ## Trabalho futuro
 
 - empacotar uma distribuição instalável com entrypoint no `PATH`;
-- adicionar política opcional e estritamente declarativa em `.agent-loop.toml`;
+- versionar migrações do schema de `.agent-loop/project.toml` e de runs antigos;
+- separar delivery em worker sem credencial Telegram e com ambiente Git mínimo;
 - persistir/rotacionar offsets do Telegram para reduzir replays após restart;
+- impor singleton/claim durável para o outbox da ponte;
+- adicionar cotas de processo, memória, disco e saída por fase;
 - testar a matriz em CI para versões suportadas de Python e systemd;
 - oferecer instalador e desinstalador opcionais para a unidade de usuário.
 

@@ -66,7 +66,10 @@ manifesto, cria uma index temporária com somente as entradas revisadas, grava
 `main`, `master` e a base configurada nunca são alvos. Branch remota diferente
 gera `remote_branch_exists`; a mesma branch no mesmo commit é idempotente.
 Credenciais Git não são copiadas para o run: usa-se apenas a autenticação já
-configurada pelo usuário.
+configurada pelo usuário. Isso não isola automaticamente o ambiente do processo:
+quando a entrega parte da ponte, subprocessos e hooks Git podem herdar variáveis
+da unidade, inclusive o token Telegram carregado por `EnvironmentFile`. Use
+delivery somente com hooks confiáveis até existir um worker sem essa credencial.
 
 ## Bootstrap e ambiente
 
@@ -93,7 +96,10 @@ automaticamente. Deve ser regular, não symlink, do usuário atual e `0600` (ou
 mais restritivo). Chaves extras são ignoradas; somente nomes em
 `environment.required` chegam ao bootstrap, Cursor e validações. Logs mostram
 apenas `NOME=set|unset`, substituem valores por `[REDACTED]` e URLs por
-`[REDACTED_URL]`.
+`[REDACTED_URL]` nos artefatos finais. Durante a execução, stdout e stderr passam
+por arquivos temporários brutos antes da sanitização; uma morte abrupta do
+supervisor pode deixá-los no run directory. Proteja o state root contra outros
+usuários locais e inspecione/remova esses arquivos após uma interrupção anormal.
 
 ## Timeout, grupo de processos e heartbeat
 
@@ -101,7 +107,8 @@ Cada fase inicia uma nova sessão/grupo. No timeout, o supervisor envia `SIGTERM
 ao grupo, aguarda `policy.terminate_grace_seconds` e usa `SIGKILL` se necessário.
 O worktree permanece; `failure.json` registra `executor_timeout`,
 `reviewer_timeout`, `*_empty_report` etc., e o status fica `BLOCKED`. Saída vazia
-nunca é sucesso.
+nunca é sucesso. O isolamento é por grupo de processos, não por cgroup: um
+descendente deliberado que crie outra sessão pode escapar desse encerramento.
 
 Durante a fase, `heartbeat.json` é substituído atomicamente e uma linha segura
 mostra fase, iteração, elapsed, PID/PGID, última atividade, arquivos modificados
@@ -157,8 +164,12 @@ repetições enquanto a extensão está ativa não somam orçamento.
 
 O feedback autorizado permanece no mesmo `review-N.json`; o executor seguinte
 começa em `N+1`. Alterar o ledger, feedback ou snapshot rompe os bindings e
-impede a retomada. O botão Telegram de extensão não faz parte do DX-04: fica
-como follow-up para evitar uma segunda superfície de autorização nesta entrega.
+impede a retomada quando a alteração atinge os campos vinculados. Os timestamps
+`authorized_at`/`updated_at` não participam do identificador determinístico, e
+os hashes não autenticam um adversário com o mesmo usuário capaz de reescrever
+artefatos e recalculá-los. O botão Telegram de extensão não faz parte do DX-04:
+fica como follow-up para evitar uma segunda superfície de autorização nesta
+entrega.
 
 Exemplo abreviado de `delivery.json`:
 
@@ -198,6 +209,15 @@ Anexar não altera status. Somente uma nova revisão pode abrir o gate humano.
   verifica recursos autorizados pelo projeto.
 - Outro processo do mesmo usuário ainda pode alterar o worktree fora do lock;
   hashes antes/depois da revisão, antes do push e `verify` detectam esse drift.
+- Locks e hashes detectam corrupção e alterações acidentais, mas não autenticam
+  o state root contra adulteração deliberada por outro processo com o mesmo UID.
+- A unidade systemd atual escreve somente no state root e, isoladamente, não
+  consegue concluir `push_branch`; use o runner ativo ou `resume` fora da unidade.
+- Saída de subprocessos e snapshots grandes não possuem cota de disco/memória;
+  os arquivos brutos anteriores à sanitização podem sobreviver a uma morte
+  abrupta do supervisor.
+- Runs congelam o perfil serializado. Uma versão futura que altere defaults ou
+  schema precisa de migração explícita para não tornar runs antigos incompatíveis.
 - Autenticação e políticas server-side do remote continuam externas; falhas
   ficam em `DELIVERY_FAILED` e exigem correção operacional antes do `resume`.
 - `SIGKILL` aplicado ao próprio supervisor pode impedir sua gravação final; o
