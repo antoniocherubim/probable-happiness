@@ -47,3 +47,10 @@ Remova `push_branch`, remote, templates e `push_after_human_approval`. A
 aprovação termina em `HUMAN_APPROVED`; execute `agent-loop verify` e faça
 commit/push manualmente. Runs antigos de delivery permanecem legíveis, mas esta
 versão não cria nem retoma `delivery-job.json`.
+
+## Máquina de estados central (DX-07)
+
+O arquivo `status` não deve mais ser editado por scripts ou integrações. O
+runner usa eventos tipados, compare-and-set e `.state.lock`; o comando interno
+arbitrário `set-status` foi removido. Runs legados em `DELIVERING`,
+`DELIVERY_FAILED` ou `PUSHED` continuam inspecionáveis, mas são terminais.

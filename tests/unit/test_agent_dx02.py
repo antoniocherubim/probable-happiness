@@ -26,7 +26,6 @@ from dx.approval import (  # noqa: E402
     create_approval_request,
     read_status,
     verify_reviewed_snapshot,
-    write_status,
 )
 from dx.bridge import Bridge  # noqa: E402
 from dx.config import BridgeConfig  # noqa: E402
@@ -44,6 +43,7 @@ from dx.runstate import (  # noqa: E402
     write_run_metadata,
 )
 from dx.runtime import TIMEOUT_EXIT, supervise_command  # noqa: E402
+from dx.state_machine import RunEvent, transition_run  # noqa: E402
 from dx.telegram import FakeTelegramAPI, TelegramClient  # noqa: E402
 
 
@@ -93,6 +93,12 @@ def make_run(tmp_path: Path) -> tuple[Path, Path, Path, str]:
     )
     (run_dir / "iteration").write_text("1\n", encoding="utf-8")
     return repo, worktree, run_dir, base
+
+
+def mark_review_approved(run_dir: Path) -> None:
+    transition_run(run_dir, RunEvent.RUN_STARTED)
+    transition_run(run_dir, RunEvent.REVIEW_STARTED)
+    transition_run(run_dir, RunEvent.REVIEW_APPROVED)
 
 
 def test_project_profile_parses_complete_schema(tmp_path: Path) -> None:
@@ -375,12 +381,12 @@ def test_reviewer_timeout_is_structured_and_incomplete_json_is_rejected(tmp_path
 
 def test_resume_plans_executor_reviewer_changes_and_rejects_review_drift(tmp_path: Path) -> None:
     _repo, worktree, run_dir, base = make_run(tmp_path)
-    write_status(run_dir, "EXECUTING")
+    transition_run(run_dir, RunEvent.RUN_STARTED)
     (run_dir / "cursor-1.json").write_bytes(b"")
     assert plan_resume(run_dir)["resume_phase"] == "executor"
 
     (run_dir / "cursor-1.json").write_text('{"summary":"ok"}\n', encoding="utf-8")
-    write_status(run_dir, "REVIEWING")
+    transition_run(run_dir, RunEvent.REVIEW_STARTED)
     from dx.approval import compute_diff_hash
 
     snapshot = compute_diff_hash(worktree, base)
@@ -391,11 +397,11 @@ def test_resume_plans_executor_reviewer_changes_and_rejects_review_drift(tmp_pat
     (run_dir / "review-1.json").write_bytes(b"")
     assert plan_resume(run_dir)["resume_phase"] == "reviewer"
 
-    write_status(run_dir, "CHANGES_REQUESTED")
+    transition_run(run_dir, RunEvent.REVIEW_CHANGES_REQUESTED)
     assert plan_resume(run_dir)["iteration"] == 2
     assert plan_resume(run_dir)["resume_phase"] == "executor"
 
-    write_status(run_dir, "REVIEWING")
+    transition_run(run_dir, RunEvent.REVIEW_STARTED)
     (worktree / "tracked.txt").write_text("tampered after snapshot\n", encoding="utf-8")
     with pytest.raises(RunStateError, match="changed"):
         plan_resume(run_dir)
@@ -403,7 +409,7 @@ def test_resume_plans_executor_reviewer_changes_and_rejects_review_drift(tmp_pat
 
 def test_resume_waiting_human_reuses_gate_and_rejects_mutation(tmp_path: Path) -> None:
     _repo, worktree, run_dir, base = make_run(tmp_path)
-    write_status(run_dir, STATUS_APPROVED)
+    mark_review_approved(run_dir)
     create_approval_request(
         run_dir=run_dir,
         task="docs/tasks/DX-02.md",
@@ -458,7 +464,7 @@ def test_evidence_accepts_regular_file_and_rejects_unsafe_types(
 
 def test_resumed_review_opens_telegram_gate_and_approval_verifies(tmp_path: Path) -> None:
     _repo, worktree, run_dir, _base = make_run(tmp_path)
-    write_status(run_dir, "BLOCKED")
+    transition_run(run_dir, RunEvent.RUN_BLOCKED)
     evidence = tmp_path / "standalone-review.txt"
     evidence.write_text("untrusted supporting evidence\n", encoding="utf-8")
     attach_evidence(run_dir, evidence)

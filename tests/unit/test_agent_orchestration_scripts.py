@@ -75,6 +75,16 @@ def test_await_human_approval_setup_failure_records_blocked(tmp_path: Path) -> N
             cmd="${1:-}"
             shift || true
             case "$cmd" in
+              record-failure)
+                run_dir=""
+                while [[ $# -gt 0 ]]; do
+                  case "$1" in
+                    --run-dir) run_dir="$2"; shift 2 ;;
+                    *) shift ;;
+                  esac
+                done
+                printf '%s\\n' 'BLOCKED' > "$run_dir/status"
+                ;;
               create-request)
                 echo "should not create request without reviewed hash" >&2
                 exit 1
@@ -188,6 +198,19 @@ def test_await_human_approval_successful_loop_completion(tmp_path: Path) -> None
             cmd="${1:-}"
             shift || true
             case "$cmd" in
+              transition-state)
+                run_dir=""
+                event=""
+                while [[ $# -gt 0 ]]; do
+                  case "$1" in
+                    --run-dir) run_dir="$2"; shift 2 ;;
+                    --event) event="$2"; shift 2 ;;
+                    *) shift ;;
+                  esac
+                done
+                [[ "$event" == "review_approved" ]]
+                printf '%s\\n' 'APPROVED' > "$run_dir/status"
+                ;;
               create-request)
                 run_dir=""
                 while [[ $# -gt 0 ]]; do
@@ -287,6 +310,19 @@ def test_await_human_approval_timeout_does_not_rewrite_status(tmp_path: Path) ->
             cmd="${1:-}"
             shift || true
             case "$cmd" in
+              transition-state)
+                run_dir=""
+                event=""
+                while [[ $# -gt 0 ]]; do
+                  case "$1" in
+                    --run-dir) run_dir="$2"; shift 2 ;;
+                    --event) event="$2"; shift 2 ;;
+                    *) shift ;;
+                  esac
+                done
+                [[ "$event" == "review_approved" ]]
+                printf '%s\\n' 'APPROVED' > "$run_dir/status"
+                ;;
               create-request)
                 run_dir=""
                 while [[ $# -gt 0 ]]; do
@@ -703,7 +739,19 @@ def test_signal_handler_blocks_active_run_and_preserves_worktree(tmp_path: Path)
             """\
             #!/usr/bin/env bash
             set -euo pipefail
-            [[ "$1" == "notify-blocked" ]]
+            cmd="$1"
+            shift
+            if [[ "$cmd" == "record-failure" ]]; then
+              while [[ $# -gt 0 ]]; do
+                case "$1" in
+                  --run-dir) run_dir="$2"; shift 2 ;;
+                  *) shift ;;
+                esac
+              done
+              printf '%s\n' BLOCKED > "$run_dir/status"
+              exit 0
+            fi
+            [[ "$cmd" == "notify-blocked" ]]
             while [[ $# -gt 0 ]]; do
               case "$1" in
                 --run-dir) run_dir="$2"; shift 2 ;;

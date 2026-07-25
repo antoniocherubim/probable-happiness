@@ -46,12 +46,9 @@ notify_terminal_failure() {
     >/dev/null 2>&1 || true
 }
 
-write_run_status() {
-  local value="$1"
-  local temporary="$RUN_DIR/.status.$$"
-  printf '%s\n' "$value" > "$temporary"
-  chmod 600 "$temporary"
-  mv "$temporary" "$RUN_DIR/status"
+transition_run_state() {
+  local event="$1"
+  DX_CLI transition-state --run-dir "$RUN_DIR" --event "$event" >/dev/null
 }
 
 block_run() {
@@ -62,14 +59,14 @@ block_run() {
   if [[ -z "$structured_reason" ]]; then
     structured_reason="${phase}_failed"
   fi
-  write_run_status "BLOCKED"
-  if [[ -z "${AGENT_DX_CLI:-}" ]]; then
-    DX_CLI record-failure \
-      --run-dir "$RUN_DIR" \
-      --reason "$structured_reason" \
-      --phase "$phase" \
-      --iteration "${iteration:-0}" \
-      --report "$report_hint"
+  if ! DX_CLI record-failure \
+    --run-dir "$RUN_DIR" \
+    --reason "$structured_reason" \
+    --phase "$phase" \
+    --iteration "${iteration:-0}" \
+    --report "$report_hint"; then
+    note "failed to record structured blocker; inspect run state: $RUN_DIR"
+    return 1
   fi
   notify_terminal_failure "$reason" "$report_hint" failure
 }
@@ -142,10 +139,10 @@ await_human_approval() {
       "$review_report"
   fi
 
-  # Record technical APPROVED before create-request. The gate transitions only
+  # Technical APPROVED was recorded after the reviewer report was validated.
+  # The gate transitions only
   # APPROVED → AWAITING_HUMAN_APPROVAL; never from BLOCKED / HUMAN_APPROVED / other.
-  write_run_status "APPROVED"
-
+  transition_run_state "review_approved"
   set +e
   DX_CLI create-request \
     --run-dir "$RUN_DIR" \
@@ -398,7 +395,7 @@ _run_task_entry() {
     RUN_DIR="$(allocate_exclusive_run_dir "$STATE_ROOT/runs" "$TASK_SLUG")"
     note "creating isolated worktree at $WORKTREE"
     git worktree add --detach "$WORKTREE" "$BASE_COMMIT"
-    write_run_status "EXECUTING"
+    transition_run_state "run_started"
     trap 'handle_loop_signal INT 130' INT
     trap 'handle_loop_signal TERM 143' TERM
     trap 'handle_loop_signal HUP 129' HUP
@@ -455,7 +452,7 @@ _run_task_entry() {
     if [[ "$START_PHASE" == "executor" ]]; then
       CURRENT_PHASE="executor"
       note "iteration $iteration/$MAX_ITERATIONS: Cursor executing"
-      write_run_status "EXECUTING"
+      transition_run_state "executor_started"
 
     EXECUTOR_PROMPT="You are the executor for task $TASK_ID. Work only inside this isolated worktree. Read $TASK_FILE completely and implement it. Preserve the task's exclusions. Run the required tests that are available. Read .agent-loop/project.toml and update every document required by [documentation], including roadmap/status when configured. Required documentation must accurately record behavior, test evidence, and residual risks. Do not declare completion without test evidence. Do not insert a commit hash or branch URL that does not exist yet. Do not commit, push, merge, deploy, or access secrets. Finish with an exact summary of files changed, documents changed, and tests passed, failed, or skipped."
       EXECUTOR_INSTRUCTIONS="$(DX_CLI instructions --repo "$WORKTREE" --phase executor)" || \
@@ -519,7 +516,7 @@ _run_task_entry() {
 
     CURRENT_PHASE="reviewer"
     note "iteration $iteration/$MAX_ITERATIONS: Codex reviewing"
-    write_run_status "REVIEWING"
+    transition_run_state "review_started"
     REVIEW_FILE="$RUN_DIR/review-${iteration}.json"
     REVIEW_CANDIDATE="$RUN_DIR/.review-${iteration}.candidate.$$.json"
     REVIEW_PROMPT="Act only as a reviewer. Read $TASK_FILE and inspect every tracked and untracked change in this worktree relative to base commit $BASE_COMMIT. Validate acceptance criteria, concurrency, migrations, rollback, security, scope, and tests. Read .agent-loop/project.toml and explicitly verify that every configured required documentation path was changed and accurately describes behavior, test evidence, and residual risks. Documentation must not invent a future commit hash or branch URL. Run safe relevant checks when useful, but do not edit any file."
@@ -613,7 +610,7 @@ _run_task_entry() {
         ;;
       CHANGES_REQUESTED)
         LATEST_FEEDBACK="$(<"$REVIEW_FILE")"
-        write_run_status "CHANGES_REQUESTED"
+        transition_run_state "review_changes_requested"
         note "review requested changes; feedback returned to Cursor"
         if [[ "$REVIEW_ONLY" -eq 1 ]]; then
           note "review-only completed with CHANGES_REQUESTED; executor was not started"

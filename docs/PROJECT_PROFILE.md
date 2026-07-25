@@ -102,6 +102,10 @@ e estado. Nenhum conteúdo ou ambiente entra no heartbeat.
 
 ## Máquina de estados de retomada
 
+O planner valida as precondições de domínio e então emite um evento tipado. A
+publicação usa compare-and-set sob `.state.lock`; não existe mais writer
+genérico capaz de atribuir um status arbitrário.
+
 ```text
 EXECUTING/interrompido  -> executor da mesma iteração
 REVIEWING/interrompido  -> nova revisão do snapshot pré-revisão

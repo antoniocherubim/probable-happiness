@@ -1,6 +1,6 @@
 # DX-06C — Operação local sem push automático
 
-Status: implementada; aguardando revisão formal.
+Status: concluída e integrada em `main`.
 
 Marco: M0, fechamento simplificado.
 

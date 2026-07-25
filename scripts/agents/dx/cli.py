@@ -22,7 +22,7 @@ from .approval import (
 )
 from .bridge import Bridge, build_awaiting_summary, build_blocked_summary
 from .config import ConfigError, human_approval_timeout_sec, load_bridge_config
-from .atomic import atomic_write_json
+from .atomic import atomic_write_json, run_scoped_lock
 from .paths import (
     PathConfigError,
     default_state_root,
@@ -55,7 +55,22 @@ from .snapshot import (
     reject_nonignored_special_files,
     validate_documentation,
 )
+from .state_machine import (
+    STATE_LOCK_FILENAME,
+    RunEvent,
+    StateTransitionError,
+    transition_run,
+)
 from .telegram import TelegramClient
+
+
+RUNNER_TRANSITION_EVENTS = (
+    RunEvent.RUN_STARTED,
+    RunEvent.EXECUTOR_STARTED,
+    RunEvent.REVIEW_STARTED,
+    RunEvent.REVIEW_CHANGES_REQUESTED,
+    RunEvent.REVIEW_APPROVED,
+)
 
 
 def _repo_root_from_here() -> Path:
@@ -554,29 +569,46 @@ def cmd_review_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_set_status(args: argparse.Namespace) -> int:
-    from .approval import write_status
-
-    write_status(Path(args.run_dir), args.status)
+def cmd_transition_state(args: argparse.Namespace) -> int:
+    try:
+        result = transition_run(Path(args.run_dir), args.event)
+    except (OSError, StateTransitionError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(dataclasses.asdict(result), default=str, sort_keys=True))
     return 0
 
 
 def cmd_record_failure(args: argparse.Namespace) -> int:
-    from .approval import utc_now_iso, write_status
+    from .approval import utc_now_iso
 
     run_dir = Path(args.run_dir)
-    write_status(run_dir, "BLOCKED")
-    atomic_write_json(
-        run_dir / "failure.json",
-        {
-            "schema_version": 1,
-            "reason": args.reason,
-            "phase": args.phase,
-            "iteration": args.iteration,
-            "report": args.report or None,
-            "recorded_at": utc_now_iso(),
-        },
-    )
+    failure_path = run_dir / "failure.json"
+    try:
+        with run_scoped_lock(run_dir, lock_name=STATE_LOCK_FILENAME):
+            result = transition_run(
+                run_dir,
+                RunEvent.RUN_BLOCKED,
+                state_lock_held=True,
+            )
+            # A replay must not replace the first structured blocker. If a
+            # prior process crashed after publishing BLOCKED, complete the
+            # missing artifact while still holding the canonical state lock.
+            if result.result == "applied" or not failure_path.exists():
+                atomic_write_json(
+                    failure_path,
+                    {
+                        "schema_version": 1,
+                        "reason": args.reason,
+                        "phase": args.phase,
+                        "iteration": args.iteration,
+                        "report": args.report or None,
+                        "recorded_at": utc_now_iso(),
+                    },
+                )
+    except (OSError, StateTransitionError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -770,10 +802,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--file", required=True)
     p.set_defaults(func=cmd_review_status)
 
-    p = sub.add_parser("set-status", help="Atomically write a run status")
+    p = sub.add_parser("transition-state", help="Apply a typed run-state event")
     p.add_argument("--run-dir", required=True)
-    p.add_argument("status")
-    p.set_defaults(func=cmd_set_status)
+    p.add_argument(
+        "--event",
+        required=True,
+        choices=[event.value for event in RUNNER_TRANSITION_EVENTS],
+    )
+    p.set_defaults(func=cmd_transition_state)
 
     p = sub.add_parser("record-failure", help="Atomically block a run with structured reason")
     p.add_argument("--run-dir", required=True)
