@@ -83,6 +83,17 @@ Confirme que não restaram processos antes de retomar:
 pgrep -af 'agent-loop|run_task|cursor-agent|codex'
 ```
 
+Wrappers `cursorsandbox` com `PPID 1` são órfãos. Não mate o grupo de processos
+deles, pois um grupo antigo pode coincidir com a sessão gráfica. Liste apenas os
+órfãos:
+
+```bash
+ps -C cursorsandbox -o pid=,ppid=,etime= | awk '$2 == 1 {print}'
+```
+
+A limpeza exige privilégio do host e deve sinalizar somente os PIDs listados,
+nunca `kill -- -PGID`.
+
 Retome usando o caminho real exibido pelo run:
 
 ```bash
@@ -107,4 +118,3 @@ Não use placeholders com `<` e `>` no shell.
 - não faça merge/push remotamente sem revisar `git status`, `git diff` e o
   relatório final;
 - preserve o worktree antes de abandonar um run com changes requested.
-

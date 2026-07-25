@@ -30,7 +30,7 @@ mesmo UID.
 
 | Ordem | Task | Resultado |
 |---|---|---|
-| 1 | [PS-01](tasks/PS-01.md) | preflight simples do run e cleanup do filho |
+| 1 | [PS-01](tasks/PS-01.md) | scope systemd e cleanup de todos os descendentes |
 | 2 | [PS-02](tasks/PS-02.md) | stdout/stderr com limite |
 | 3 | [PS-03](tasks/PS-03.md) | arquivos e snapshot com limite |
 | 4 | [PS-04](tasks/PS-04.md) | segredos separados por fase |
@@ -44,7 +44,7 @@ Finding adjacente vira backlog; não expande a task em execução.
 
 - proteção contra adulteração deliberada pelo mesmo UID;
 - migrations, backup transacional e rollback automático;
-- cgroups completos, fork-bomb adversarial e isolamento multiusuário;
+- quotas completas, fork-bomb adversarial e isolamento multiusuário;
 - outbox Telegram de alta disponibilidade;
 - pacote público, compatibilidade multiplataforma, SBOM e release assinada;
 - governança, suporte e documentação para terceiros.
@@ -52,10 +52,9 @@ Finding adjacente vira backlog; não expande a task em execução.
 ## Critérios de saída
 
 1. Um run real executa, revisa, solicita decisão e verifica o snapshot aprovado.
-2. Timeout ou erro de heartbeat não deixa o filho supervisionado ativo.
+2. Timeout ou erro de heartbeat deixa o scope da fase vazio.
 3. Saída e snapshot acima dos limites falham preservando o worktree.
 4. Executor, bootstrap e validação recebem somente seus segredos declarados.
 5. Retomada, rejeição e orçamento adicional funcionam em teste ponta a ponta.
 6. Nenhuma etapa cria commit, merge, branch remota ou push.
 7. O runbook SSH permite observar e interromper o loop sem perder o worktree.
-
