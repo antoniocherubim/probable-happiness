@@ -126,9 +126,36 @@ def assert_contained(path: Path | str, root: Path | str) -> Path:
     return candidate_norm
 
 
+def assert_path_components_unlinked(path: Path | str) -> Path:
+    """Refuse any symlink in ``path``'s components (leaf or intermediate).
+
+    Returns the absolute, lexically normalized path. Does not follow links.
+    """
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    candidate_norm = Path(os.path.normpath(str(candidate)))
+    current = Path(candidate_norm.anchor)
+    parts = candidate_norm.parts[1:]
+    for index, part in enumerate(parts):
+        current = current / part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            break
+        except OSError as exc:
+            raise PersistError(f"cannot inspect path component {current}: {exc}") from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise PersistError(f"refusing symlink in path: {current}")
+        is_last = index == len(parts) - 1
+        if not is_last and not stat.S_ISDIR(info.st_mode):
+            raise PersistError(f"path intermediate is not a directory: {current}")
+    return candidate_norm
+
+
 def ensure_private_dir(path: Path | str, *, mode: int = 0o700) -> Path:
     """Create or validate a directory with owner-only access."""
-    directory = Path(path)
+    directory = assert_path_components_unlinked(path)
     if directory.exists():
         info = directory.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
@@ -141,6 +168,201 @@ def ensure_private_dir(path: Path | str, *, mode: int = 0o700) -> Path:
     if parent.is_dir() and not parent.is_symlink():
         fsync_directory(parent)
     return directory
+
+
+def secure_acquire_lock_fd(
+    run_dir: Path | str,
+    lock_name: str,
+    *,
+    expected_owner: int | None = None,
+) -> int:
+    """Open a run lock FD after validating directory and lock without repair.
+
+    Existing insecure locks (mode ≠ ``0600``, wrong owner, hard link, symlink,
+    type change, inode swap) raise ``PersistError`` without ``chmod``, replace,
+    or other mutation. New locks are created ``0600`` and the directory entry is
+    fsynced before return.
+
+    The run directory path must not include intermediate symlinks. Callers that
+    ``flock`` must revalidate the pathname inode after locking (see
+    ``run_scoped_lock``).
+    """
+    directory = assert_path_components_unlinked(run_dir)
+    owner = os.geteuid() if expected_owner is None else expected_owner
+    if directory.exists():
+        dir_info = directory.lstat()
+        if stat.S_ISLNK(dir_info.st_mode) or not stat.S_ISDIR(dir_info.st_mode):
+            raise PersistError(f"run directory must be a regular directory: {directory}")
+        _check_owner_mode(dir_info, directory, require_private=True, allow_exec=True)
+        if dir_info.st_uid != owner:
+            raise PersistError(
+                f"unexpected owner for {directory}: uid={dir_info.st_uid}, "
+                f"expected={owner}"
+            )
+    else:
+        ensure_private_dir(directory)
+
+    if Path(lock_name).name != lock_name or "/" in lock_name:
+        raise PersistError(f"lock name must be a basename: {lock_name}")
+    lock_path = directory / lock_name
+    created = False
+    try:
+        before = lock_path.lstat()
+    except FileNotFoundError:
+        before = None
+
+    if before is not None:
+        if stat.S_ISLNK(before.st_mode):
+            raise PersistError(f"refusing symlink lock: {lock_path}")
+        if not stat.S_ISREG(before.st_mode):
+            raise PersistError(f"lock path is not a regular file: {lock_path}")
+        if before.st_uid != owner:
+            raise PersistError(
+                f"unexpected owner for {lock_path}: uid={before.st_uid}, "
+                f"expected={owner}"
+            )
+        mode = stat.S_IMODE(before.st_mode)
+        if mode != 0o600:
+            raise PersistError(
+                f"insecure lock mode for {lock_path}: {oct(mode)}; refusing mutation"
+            )
+        if before.st_nlink != 1:
+            raise PersistError(
+                f"unexpected hard link on lock (nlink={before.st_nlink}): {lock_path}"
+            )
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(str(lock_path), flags)
+        except OSError as exc:
+            raise PersistError(f"cannot open lock {lock_path}: {exc}") from exc
+    else:
+        flags = (
+            os.O_CREAT
+            | os.O_EXCL
+            | os.O_RDWR
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            fd = os.open(str(lock_path), flags, 0o600)
+            created = True
+        except FileExistsError:
+            # Lost the create race — reopen and validate without mutation.
+            try:
+                before = lock_path.lstat()
+            except OSError as exc:
+                raise PersistError(f"cannot inspect lock {lock_path}: {exc}") from exc
+            if stat.S_ISLNK(before.st_mode):
+                raise PersistError(f"refusing symlink lock: {lock_path}")
+            if not stat.S_ISREG(before.st_mode):
+                raise PersistError(f"lock path is not a regular file: {lock_path}")
+            if before.st_uid != owner:
+                raise PersistError(
+                    f"unexpected owner for {lock_path}: uid={before.st_uid}, "
+                    f"expected={owner}"
+                )
+            mode = stat.S_IMODE(before.st_mode)
+            if mode != 0o600:
+                raise PersistError(
+                    f"insecure lock mode for {lock_path}: {oct(mode)}; "
+                    "refusing mutation"
+                )
+            if before.st_nlink != 1:
+                raise PersistError(
+                    f"unexpected hard link on lock (nlink={before.st_nlink}): "
+                    f"{lock_path}"
+                )
+            try:
+                fd = os.open(
+                    str(lock_path),
+                    os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                )
+            except OSError as exc:
+                raise PersistError(f"cannot open lock {lock_path}: {exc}") from exc
+        except OSError as exc:
+            raise PersistError(f"cannot create lock {lock_path}: {exc}") from exc
+        if created:
+            try:
+                before = lock_path.lstat()
+            except OSError as exc:
+                os.close(fd)
+                raise PersistError(
+                    f"cannot inspect new lock {lock_path}: {exc}"
+                ) from exc
+
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise PersistError(f"lock path is not a regular file: {lock_path}")
+        assert before is not None
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise PersistError(f"lock inode changed while opening: {lock_path}")
+        if opened.st_uid != owner:
+            raise PersistError(
+                f"unexpected owner for {lock_path}: uid={opened.st_uid}, "
+                f"expected={owner}"
+            )
+        opened_mode = stat.S_IMODE(opened.st_mode)
+        if opened_mode != 0o600:
+            # Never repair: fail closed even if create raced with a wide umask.
+            raise PersistError(
+                f"insecure lock mode for {lock_path}: {oct(opened_mode)}; "
+                "refusing mutation"
+            )
+        if opened.st_nlink != 1:
+            raise PersistError(
+                f"unexpected hard link on lock (nlink={opened.st_nlink}): {lock_path}"
+            )
+        # Re-check path components after open (TOCTOU against parent swap).
+        assert_path_components_unlinked(directory)
+        if created:
+            fsync_directory(directory)
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def revalidate_lock_fd(
+    run_dir: Path | str,
+    lock_name: str,
+    fd: int,
+    *,
+    expected_owner: int | None = None,
+) -> None:
+    """After ``flock``, confirm the pathname still names the locked inode."""
+    directory = assert_path_components_unlinked(run_dir)
+    if Path(lock_name).name != lock_name or "/" in lock_name:
+        raise PersistError(f"lock name must be a basename: {lock_name}")
+    lock_path = directory / lock_name
+    owner = os.geteuid() if expected_owner is None else expected_owner
+    try:
+        path_info = lock_path.lstat()
+    except OSError as exc:
+        raise PersistError(f"lock path disappeared after flock: {lock_path}: {exc}") from exc
+    if stat.S_ISLNK(path_info.st_mode):
+        raise PersistError(f"refusing symlink lock: {lock_path}")
+    if not stat.S_ISREG(path_info.st_mode):
+        raise PersistError(f"lock path is not a regular file: {lock_path}")
+    try:
+        opened = os.fstat(fd)
+    except OSError as exc:
+        raise PersistError(f"cannot fstat lock fd for {lock_path}: {exc}") from exc
+    if (path_info.st_dev, path_info.st_ino) != (opened.st_dev, opened.st_ino):
+        raise PersistError(
+            f"lock inode replaced after flock: {lock_path}"
+        )
+    if opened.st_uid != owner or path_info.st_uid != owner:
+        raise PersistError(
+            f"unexpected owner for {lock_path}: uid={opened.st_uid}, expected={owner}"
+        )
+    if stat.S_IMODE(opened.st_mode) != 0o600 or stat.S_IMODE(path_info.st_mode) != 0o600:
+        raise PersistError(
+            f"insecure lock mode for {lock_path}; refusing mutation"
+        )
+    if opened.st_nlink != 1 or path_info.st_nlink != 1:
+        raise PersistError(
+            f"unexpected hard link on lock (nlink={opened.st_nlink}): {lock_path}"
+        )
 
 
 def _check_owner_mode(
@@ -378,6 +600,22 @@ def _refuse_unsafe_existing_target(target: Path) -> None:
     _check_owner_mode(info, target, require_private=True, allow_exec=False)
 
 
+def _write_all(fd: int, content: bytes) -> None:
+    """Write every byte; refuse success on short ``os.write`` results."""
+    if not content:
+        return
+    view = memoryview(content)
+    offset = 0
+    while offset < len(content):
+        written = os.write(fd, view[offset:])
+        if written <= 0:
+            raise PersistError(
+                f"short write while persisting durable content "
+                f"({offset}/{len(content)} bytes)"
+            )
+        offset += written
+
+
 def secure_write_bytes(
     path: Path | str,
     content: bytes,
@@ -386,7 +624,12 @@ def secure_write_bytes(
     fsync_dir: bool = True,
     containment_root: Path | str | None = None,
 ) -> None:
-    """Atomically replace a file, chmod before publish, fsync file and dir."""
+    """Atomically replace a file with durable content and mode.
+
+    Sequence: write → file fsync → apply mode → file fsync → replace → dir fsync.
+    Failure at any boundary leaves the last valid pathname or a validatable temp,
+    never a promoted success.
+    """
     target = Path(path)
     if containment_root is not None:
         # Containment uses non-strict resolve for not-yet-created leaf names.
@@ -401,15 +644,21 @@ def secure_write_bytes(
     )
     tmp_path = Path(tmp_name)
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(tmp_path, mode)
+        _write_all(fd, content)
+        os.fsync(fd)
+        os.fchmod(fd, mode)
+        os.fsync(fd)
+        os.close(fd)
+        fd = -1
         os.replace(tmp_path, target)
         if fsync_dir:
             fsync_directory(target.parent)
     except Exception:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         try:
             tmp_path.unlink(missing_ok=True)
         except OSError:
@@ -497,6 +746,7 @@ def secure_exclusive_write_json(
     content = json.dumps(payload, indent=2, sort_keys=True)
     if not content.endswith("\n"):
         content += "\n"
+    raw = content.encode("utf-8")
     fd, tmp_name = tempfile.mkstemp(
         prefix=f".{target.name}.",
         suffix=".tmp",
@@ -504,11 +754,12 @@ def secure_exclusive_write_json(
     )
     tmp_path = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(tmp_path, mode)
+        _write_all(fd, raw)
+        os.fsync(fd)
+        os.fchmod(fd, mode)
+        os.fsync(fd)
+        os.close(fd)
+        fd = -1
         try:
             os.link(str(tmp_path), str(target))
         except FileExistsError:
@@ -516,6 +767,13 @@ def secure_exclusive_write_json(
         if fsync_dir:
             fsync_directory(target.parent)
         return True
+    except Exception:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        raise
     finally:
         try:
             tmp_path.unlink(missing_ok=True)

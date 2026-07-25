@@ -19,7 +19,13 @@ from .approval import (
     validate_decision_matches_request,
 )
 from .atomic import atomic_write_json, read_json, run_scoped_lock
-from .persist import PersistError, ensure_private_dir, secure_read_json, secure_write_json
+from .persist import (
+    PersistError,
+    assert_path_components_unlinked,
+    ensure_private_dir,
+    secure_read_json,
+    secure_write_json,
+)
 from .profile import ProfileError, load_project_profile
 from .schemas import (
     FUTURE_SCHEMA_REFUSAL,
@@ -128,10 +134,16 @@ def _git_output(*args: str) -> str:
 
 
 def validate_run(run_dir: Path) -> dict[str, Any]:
-    run_candidate = Path(run_dir).expanduser()
-    if run_candidate.is_symlink() or not run_candidate.is_dir():
+    try:
+        run_dir = assert_path_components_unlinked(Path(run_dir).expanduser())
+    except PersistError as exc:
+        raise RunStateError(f"run directory path is unsafe: {exc}") from exc
+    try:
+        dir_info = run_dir.lstat()
+    except FileNotFoundError as exc:
+        raise RunStateError("run directory must be a regular directory") from exc
+    if stat.S_ISLNK(dir_info.st_mode) or not stat.S_ISDIR(dir_info.st_mode):
         raise RunStateError("run directory must be a regular directory")
-    run_dir = run_candidate.resolve()
     metadata = load_run_metadata(run_dir)
     repo_candidate = Path(str(metadata.get("repo", ""))).expanduser()
     worktree_candidate = Path(str(metadata.get("worktree", ""))).expanduser()
@@ -181,15 +193,222 @@ def validate_run(run_dir: Path) -> dict[str, Any]:
 
 
 def _review_hash(run_dir: Path, iteration: int) -> str | None:
+    """Return the reviewed diff hash, or None only when the snapshot is absent.
+
+    Dangling/present symlinks, wrong mode/owner/type, malformed JSON, unknown
+    fields, and future schema versions fail closed — never treated as missing.
+    """
     path = run_dir / f"review-{iteration}-snapshot.json"
-    if not path.is_file():
-        return None
     try:
-        data = read_json(path)
-    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
         raise RunStateError(f"invalid review snapshot: {exc}") from exc
-    value = data.get("diff_hash")
-    return str(value) if value else None
+    if stat.S_ISLNK(info.st_mode):
+        raise RunStateError("invalid review snapshot: refusing symlink")
+    if not stat.S_ISREG(info.st_mode):
+        raise RunStateError("invalid review snapshot: not a regular file")
+    try:
+        data = secure_read_json(
+            path, require_private=True, containment_root=run_dir
+        )
+    except PersistError as exc:
+        raise RunStateError(f"invalid review snapshot: {exc}") from exc
+    if set(data) != {"schema_version", "iteration", "diff_hash"}:
+        raise RunStateError(
+            "invalid review snapshot: unknown or missing fields"
+        )
+    schema = data.get("schema_version")
+    if type(schema) is int and schema > 1:
+        raise RunStateError(FUTURE_SCHEMA_REFUSAL)
+    if (
+        schema != 1
+        or data.get("iteration") != iteration
+        or not re.fullmatch(r"[0-9a-f]{64}", str(data.get("diff_hash", "")))
+    ):
+        raise RunStateError("invalid review snapshot contract")
+    return str(data["diff_hash"])
+
+
+def _regular_report_present(path: Path, *, label: str) -> bool:
+    """True when ``path`` is a non-empty regular private file with a valid contract.
+
+    Unsafe paths (symlink, wrong mode/owner, special types) always raise — even
+    for zero-byte files. Empty/truncated private reports are corrupt, not absent.
+    Corruption, unknown fields, and future schemas fail closed rather than being
+    treated as absent.
+    """
+    from .persist import secure_lstat_regular
+
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise RunStateError(f"{label} cannot be inspected: {exc}") from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise RunStateError(f"{label} must not be a symlink")
+    if not stat.S_ISREG(info.st_mode):
+        raise RunStateError(f"{label} must be a regular file")
+    # Mode/owner checks happen before the empty-file short-circuit so a
+    # zero-byte world-readable report cannot masquerade as "absent".
+    try:
+        secure_lstat_regular(path, require_private=True)
+    except PersistError as exc:
+        raise RunStateError(f"{label} cannot be read safely: {exc}") from exc
+    if info.st_size <= 0:
+        raise RunStateError(f"{label} is empty or truncated")
+    try:
+        data = secure_read_json(
+            path, require_private=True, containment_root=path.parent
+        )
+    except PersistError as exc:
+        raise RunStateError(f"{label} cannot be read safely: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RunStateError(f"{label} must be a JSON object")
+    _validate_resume_report_contract(path, data, label=label)
+    return True
+
+
+# Production Cursor Agent ``--output-format json`` result envelope persisted by
+# ``run_task.sh`` / ``supervise`` (stdout of cursor-agent). Synthetic
+# ``{"summary": ...}`` fixtures are not the on-disk production contract.
+_CURSOR_AGENT_RESULT_KEYS = frozenset(
+    {
+        "type",
+        "subtype",
+        "is_error",
+        "duration_ms",
+        "duration_api_ms",
+        "result",
+        "session_id",
+        "request_id",
+        "usage",
+    }
+)
+_CURSOR_AGENT_RESULT_REQUIRED = _CURSOR_AGENT_RESULT_KEYS
+_REVIEW_REPORT_KEYS = frozenset(
+    {"schema_version", "status", "summary", "findings", "tests_required"}
+)
+_PHASE_RESULT_KEYS = frozenset(
+    {
+        "schema_version",
+        "phase",
+        "iteration",
+        "state",
+        "reason",
+        "exit_code",
+        "child_exit_code",
+        "elapsed_seconds",
+        "last_activity_at",
+        "changed_files",
+        "finished_at",
+    }
+)
+_EVIDENCE_MANIFEST_KEYS = frozenset({"schema_version", "items"})
+_EVIDENCE_ITEM_KEYS = frozenset(
+    {"name", "sha256", "size_bytes", "attached_at", "trust"}
+)
+
+
+def _validate_resume_report_contract(
+    path: Path, data: dict[str, Any], *, label: str
+) -> None:
+    schema = data.get("schema_version")
+    if schema is not None:
+        if type(schema) is int and schema > 1:
+            raise RunStateError(FUTURE_SCHEMA_REFUSAL)
+        if schema != 1:
+            raise RunStateError(f"{label} schema_version mismatch")
+    name = path.name
+    if name.startswith("reviewer-") and name.endswith("-result.json"):
+        allowed = _PHASE_RESULT_KEYS
+        if schema is None:
+            raise RunStateError(f"{label} schema_version mismatch")
+        unknown = set(data) - allowed
+        if unknown:
+            raise RunStateError(f"{label} has unknown fields")
+        if not allowed.issubset(data):
+            raise RunStateError(f"{label} missing required fields")
+        if (
+            not isinstance(data.get("phase"), str)
+            or not data["phase"]
+            or type(data.get("iteration")) is not int
+            or data["iteration"] < 1
+            or not isinstance(data.get("state"), str)
+            or not data["state"]
+            or (
+                data.get("reason") is not None
+                and not isinstance(data.get("reason"), str)
+            )
+            or type(data.get("exit_code")) is not int
+            or type(data.get("child_exit_code")) is not int
+            or type(data.get("elapsed_seconds")) not in {int, float}
+            or not isinstance(data.get("last_activity_at"), str)
+            or not data["last_activity_at"]
+            or type(data.get("changed_files")) is not int
+            or not isinstance(data.get("finished_at"), str)
+            or not data["finished_at"]
+        ):
+            raise RunStateError(f"{label} field types are invalid")
+        return
+    if name.startswith("cursor-") and name.endswith(".json"):
+        unknown = set(data) - _CURSOR_AGENT_RESULT_KEYS
+        if unknown:
+            raise RunStateError(f"{label} has unknown fields")
+        if not _CURSOR_AGENT_RESULT_REQUIRED.issubset(data):
+            raise RunStateError(f"{label} missing required fields")
+        if (
+            data.get("type") != "result"
+            or not isinstance(data.get("subtype"), str)
+            or not data["subtype"]
+            or type(data.get("is_error")) is not bool
+            or type(data.get("duration_ms")) is not int
+            or data["duration_ms"] < 0
+            or type(data.get("duration_api_ms")) is not int
+            or data["duration_api_ms"] < 0
+            or not isinstance(data.get("result"), str)
+            or not isinstance(data.get("session_id"), str)
+            or not data["session_id"]
+            or not isinstance(data.get("request_id"), str)
+            or not data["request_id"]
+            or not isinstance(data.get("usage"), dict)
+        ):
+            raise RunStateError(f"{label} field types are invalid")
+        return
+    if (
+        name.startswith("review-")
+        and name.endswith(".json")
+        and "snapshot" not in name
+    ):
+        allowed = _REVIEW_REPORT_KEYS
+        unknown = set(data) - allowed
+        if unknown:
+            raise RunStateError(f"{label} has unknown fields")
+        # CLI review-status / authorize use status/summary/findings/tests_required
+        # without schema_version; still refuse empty or mistyped payloads.
+        required = frozenset({"status", "summary", "findings", "tests_required"})
+        if not required.issubset(data):
+            raise RunStateError(f"{label} missing required fields")
+        if (
+            data.get("status") not in {"APPROVED", "CHANGES_REQUESTED", "BLOCKED"}
+            or not isinstance(data.get("summary"), str)
+            or not isinstance(data.get("findings"), list)
+            or not isinstance(data.get("tests_required"), list)
+            or not all(isinstance(item, str) for item in data["tests_required"])
+        ):
+            raise RunStateError(f"{label} field types are invalid")
+        for finding in data["findings"]:
+            if (
+                not isinstance(finding, dict)
+                or not isinstance(finding.get("severity"), str)
+                or not isinstance(finding.get("title"), str)
+                or not isinstance(finding.get("details"), str)
+            ):
+                raise RunStateError(f"{label} field types are invalid")
+        return
+    # Unknown report naming: still refuse future schemas above.
 
 
 def _regular_json(path: Path, label: str) -> dict[str, Any]:
@@ -289,21 +508,13 @@ def _entry_chain_hash(entry: dict[str, Any]) -> str:
     ).hexdigest()
 
 
-def load_iteration_budget(run_dir: Path, original_limit: int) -> dict[str, Any]:
-    """Load and strictly validate the append-only logical budget chain."""
-    path = Path(run_dir) / ITERATION_BUDGET
-    try:
-        path.lstat()
-    except FileNotFoundError:
-        return {
-            "schema_version": ITERATION_BUDGET_SCHEMA_VERSION,
-            "run_id": Path(run_dir).name,
-            "original_limit": original_limit,
-            "effective_limit": original_limit,
-            "extensions": [],
-            "updated_at": None,
-        }
-    document = _regular_json(path, ITERATION_BUDGET)
+def validate_iteration_budget_document(
+    document: Mapping[str, Any],
+    *,
+    run_dir: Path,
+    original_limit: int,
+) -> dict[str, Any]:
+    """Strictly validate an iteration-budget document (chain + review bindings)."""
     required = {
         "schema_version",
         "run_id",
@@ -410,7 +621,27 @@ def load_iteration_budget(run_dir: Path, original_limit: int) -> dict[str, Any]:
             raise IterationBudgetError(
                 "iteration budget updated_at is not integrity-bound to the tip entry"
             )
-    return document
+    return dict(document)
+
+
+def load_iteration_budget(run_dir: Path, original_limit: int) -> dict[str, Any]:
+    """Load and strictly validate the append-only logical budget chain."""
+    path = Path(run_dir) / ITERATION_BUDGET
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return {
+            "schema_version": ITERATION_BUDGET_SCHEMA_VERSION,
+            "run_id": Path(run_dir).name,
+            "original_limit": original_limit,
+            "effective_limit": original_limit,
+            "extensions": [],
+            "updated_at": None,
+        }
+    document = _regular_json(path, ITERATION_BUDGET)
+    return validate_iteration_budget_document(
+        document, run_dir=run_dir, original_limit=original_limit
+    )
 
 
 def effective_iteration_limit(run_dir: Path, original_limit: int) -> int:
@@ -442,16 +673,23 @@ def _failure_reason(run_dir: Path) -> tuple[str, dict[str, Any]]:
 
 
 def _probe_delivery_lock(run_dir: Path) -> None:
-    path = run_dir / ".delivery.lock"
+    from .persist import PersistError, revalidate_lock_fd, secure_acquire_lock_fd
+
+    fd: int | None = None
     try:
-        fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise IterationBudgetError("delivery lock is not a regular file")
+        fd = secure_acquire_lock_fd(run_dir, ".delivery.lock")
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (BlockingIOError, OSError) as exc:
+        revalidate_lock_fd(run_dir, ".delivery.lock", fd)
+    except BlockingIOError as exc:
         raise IterationBudgetError("a delivery operation is currently active") from exc
+    except (OSError, PersistError) as exc:
+        raise IterationBudgetError(f"cannot probe delivery lock: {exc}") from exc
     finally:
-        if "fd" in locals():
+        if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
             os.close(fd)
 
 
@@ -717,7 +955,10 @@ def authorize_iteration_extension(
         )
     if origin not in {"cli", "telegram"}:
         raise IterationBudgetError("iteration-budget origin is invalid")
-    run_dir = Path(run_dir).expanduser().resolve()
+    try:
+        run_dir = assert_path_components_unlinked(Path(run_dir).expanduser())
+    except PersistError as exc:
+        raise IterationBudgetError(f"run directory path is unsafe: {exc}") from exc
     if resume_lock_held:
         return _authorize_iteration_extension_locked(
             run_dir, additional_iterations, origin=origin
@@ -729,15 +970,38 @@ def authorize_iteration_extension(
 
 
 def plan_resume(run_dir: Path, *, review_only: bool = False) -> dict[str, Any]:
-    run_dir = Path(run_dir).expanduser().resolve()
+    try:
+        run_dir = assert_path_components_unlinked(Path(run_dir).expanduser())
+    except PersistError as exc:
+        raise RunStateError(f"run directory path is unsafe: {exc}") from exc
     metadata = validate_run(run_dir)
     status = metadata["status"]
     worktree = Path(metadata["worktree"])
     base = str(metadata["base_commit"])
     try:
-        iteration = int((run_dir / "iteration").read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        iteration = 1
+        iteration_path = run_dir / "iteration"
+        try:
+            iteration_path.lstat()
+        except FileNotFoundError:
+            iteration = 1
+        else:
+            from .persist import secure_read_text
+
+            try:
+                iteration = int(
+                    secure_read_text(
+                        iteration_path,
+                        max_bytes=64,
+                        require_private=True,
+                        containment_root=run_dir,
+                    ).strip()
+                )
+            except (PersistError, UnicodeError, ValueError) as exc:
+                raise RunStateError(
+                    f"iteration cursor cannot be read safely: {exc}"
+                ) from exc
+    except RunStateError:
+        raise
     original_limit = int(metadata["max_iterations"])
     budget = load_iteration_budget(run_dir, original_limit)
     effective_limit = int(budget["effective_limit"])
@@ -782,6 +1046,11 @@ def plan_resume(run_dir: Path, *, review_only: bool = False) -> dict[str, Any]:
         if snapshot and current != snapshot:
             raise RunStateError("worktree changed during or after interrupted review")
         reviewer_result = run_dir / f"reviewer-{iteration}-result.json"
+        # Always probe the cursor report when present so a zero-byte/corrupt
+        # private file cannot masquerade as absent on the executor fallthrough.
+        cursor_ok = _regular_report_present(
+            cursor_report, label=f"cursor-{iteration}.json"
+        )
         latest_extension = budget["extensions"][-1] if budget["extensions"] else None
         pending_extension = (
             status == "BLOCKED"
@@ -800,13 +1069,17 @@ def plan_resume(run_dir: Path, *, review_only: bool = False) -> dict[str, Any]:
             iteration += 1
         elif review_only:
             phase = "reviewer"
-        elif snapshot and cursor_report.is_file() and cursor_report.stat().st_size > 0:
+        elif snapshot and cursor_ok:
             # The pre-review hash binds the snapshot. Whether the reviewer was
             # interrupted, timed out, or left an empty file, rerun that review.
             phase = "reviewer"
-        elif status == "REVIEWING" and cursor_report.is_file() and cursor_report.stat().st_size > 0:
+        elif status == "REVIEWING" and cursor_ok:
             phase = "reviewer"
-        elif reviewer_result.is_file() and review_report.is_file() and review_report.stat().st_size > 0:
+        elif _regular_report_present(
+            reviewer_result, label=f"reviewer-{iteration}-result.json"
+        ) and _regular_report_present(
+            review_report, label=f"review-{iteration}.json"
+        ):
             phase = "reviewer"
         else:
             phase = "executor"
@@ -822,59 +1095,109 @@ def plan_resume(run_dir: Path, *, review_only: bool = False) -> dict[str, Any]:
     }
 
 
+def _load_evidence_manifest(run_dir: Path) -> dict[str, Any]:
+    """Load and validate the evidence manifest, or return an empty v1 document.
+
+    Missing is allowed; present corrupt/future/symlink manifests fail closed.
+    """
+    manifest_path = run_dir / EVIDENCE_MANIFEST
+    try:
+        manifest_info = manifest_path.lstat()
+    except FileNotFoundError:
+        return {"schema_version": 1, "items": []}
+    if stat.S_ISLNK(manifest_info.st_mode) or not stat.S_ISREG(manifest_info.st_mode):
+        raise RunStateError("evidence manifest must be a regular non-symlink file")
+    try:
+        manifest = secure_read_json(
+            manifest_path,
+            require_private=True,
+            containment_root=run_dir,
+        )
+    except PersistError as exc:
+        raise RunStateError(f"invalid evidence manifest: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise RunStateError("invalid evidence manifest")
+    unknown = set(manifest) - _EVIDENCE_MANIFEST_KEYS
+    if unknown:
+        raise RunStateError("evidence manifest has unknown fields")
+    schema = manifest.get("schema_version")
+    if type(schema) is int and schema > 1:
+        raise RunStateError(FUTURE_SCHEMA_REFUSAL)
+    if schema != 1:
+        raise RunStateError("evidence manifest schema_version mismatch")
+    items = manifest.get("items")
+    if not isinstance(items, list):
+        raise RunStateError("invalid evidence manifest")
+    for item in items:
+        if not isinstance(item, dict):
+            raise RunStateError("invalid evidence manifest")
+        if set(item) - _EVIDENCE_ITEM_KEYS:
+            raise RunStateError("evidence manifest has unknown fields")
+        if not {
+            "name",
+            "sha256",
+            "size_bytes",
+            "attached_at",
+            "trust",
+        }.issubset(item):
+            raise RunStateError("invalid evidence manifest")
+        if (
+            not isinstance(item.get("name"), str)
+            or not item["name"]
+            or not re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", "")))
+            or type(item.get("size_bytes")) is not int
+            or item["size_bytes"] < 0
+            or not isinstance(item.get("attached_at"), str)
+            or not item["attached_at"]
+            or not isinstance(item.get("trust"), str)
+            or not item["trust"]
+        ):
+            raise RunStateError("invalid evidence manifest item fields")
+    return manifest
+
+
 def attach_evidence(run_dir: Path, source: Path, *, max_bytes: int = MAX_EVIDENCE_BYTES) -> dict[str, Any]:
     if max_bytes < 1:
         raise RunStateError("evidence size limit must be positive")
-    run_dir = Path(run_dir).expanduser().resolve()
+    try:
+        run_dir = assert_path_components_unlinked(Path(run_dir).expanduser())
+    except PersistError as exc:
+        raise RunStateError(f"run directory path is unsafe: {exc}") from exc
     validate_run(run_dir)
     source = Path(source).expanduser()
+    from .persist import secure_read_bytes, secure_write_bytes
+
     try:
-        before = source.lstat()
-    except OSError as exc:
-        raise RunStateError(f"evidence file not found: {source}") from exc
-    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-        raise RunStateError("evidence must be a regular non-symlink file")
-    if before.st_size > max_bytes:
-        raise RunStateError(f"evidence exceeds {max_bytes} bytes")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(source, flags)
-    except OSError as exc:
-        raise RunStateError(f"cannot safely open evidence: {exc}") from exc
-    try:
-        opened = os.fstat(fd)
-        if not stat.S_ISREG(opened.st_mode):
-            raise RunStateError("evidence type changed while opening")
-        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
-            raise RunStateError("evidence inode changed while opening")
-        if opened.st_size > max_bytes:
-            raise RunStateError(f"evidence exceeds {max_bytes} bytes")
-        chunks: list[bytes] = []
-        total = 0
-        digest = hashlib.sha256()
-        while True:
-            chunk = os.read(fd, min(65536, max_bytes + 1 - total))
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                raise RunStateError(f"evidence exceeds {max_bytes} bytes")
-            digest.update(chunk)
-            chunks.append(chunk)
-        after = os.fstat(fd)
-        if (
-            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-            != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+        # Source may live outside the private state root; still refuse symlink,
+        # special types, hard links, and inode swap via the common API.
+        payload = secure_read_bytes(
+            source,
+            max_bytes=max_bytes,
+            require_private=False,
+        )
+    except PersistError as exc:
+        message = str(exc)
+        if "missing" in message:
+            raise RunStateError(f"evidence file not found: {source}") from exc
+        if any(
+            token in message
+            for token in ("symlink", "FIFO", "socket", "device", "directory", "special")
         ):
-            raise RunStateError("evidence changed while reading")
-    finally:
-        os.close(fd)
-    sha256 = digest.hexdigest()
+            raise RunStateError("evidence must be a regular non-symlink file") from exc
+        if "exceeds" in message:
+            raise RunStateError(f"evidence exceeds {max_bytes} bytes") from exc
+        raise RunStateError(f"cannot safely open evidence: {exc}") from exc
+    # Validate any existing manifest before lock/blob publication so a
+    # future-schema or corrupt manifest with a new source leaves no residue.
+    _load_evidence_manifest(run_dir)
+    sha256 = hashlib.sha256(payload).hexdigest()
+    total = len(payload)
     safe_name = "".join(char if char.isalnum() or char in "._-" else "-" for char in source.name)[:80]
     safe_name = safe_name.strip(".-") or "evidence"
     evidence_dir = run_dir / "evidence"
     destination = evidence_dir / f"{sha256[:16]}-{safe_name}"
     with run_scoped_lock(run_dir, lock_name=".resume.lock"):
+        manifest = _load_evidence_manifest(run_dir)
         evidence_dir.mkdir(mode=0o700, exist_ok=True)
         try:
             destination.lstat()
@@ -883,42 +1206,24 @@ def attach_evidence(run_dir: Path, source: Path, *, max_bytes: int = MAX_EVIDENC
             destination_present = False
         if destination_present:
             try:
-                existing_fd = os.open(
+                existing = secure_read_bytes(
                     destination,
-                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    max_bytes=max_bytes,
+                    require_private=True,
+                    containment_root=run_dir,
                 )
-            except OSError as exc:
+            except PersistError as exc:
                 raise RunStateError("evidence destination was tampered with") from exc
-            try:
-                existing_stat = os.fstat(existing_fd)
-                if not stat.S_ISREG(existing_stat.st_mode):
-                    raise RunStateError("evidence destination was tampered with")
-                existing_digest = hashlib.sha256()
-                while True:
-                    chunk = os.read(existing_fd, 65536)
-                    if not chunk:
-                        break
-                    existing_digest.update(chunk)
-                existing = existing_digest.hexdigest()
-            finally:
-                os.close(existing_fd)
-            if existing != sha256:
+            if hashlib.sha256(existing).hexdigest() != sha256:
                 raise RunStateError("evidence destination hash mismatch")
         else:
-            from .persist import secure_write_bytes
-
             secure_write_bytes(
                 destination,
-                b"".join(chunks),
+                payload,
                 mode=0o600,
                 fsync_dir=True,
                 containment_root=run_dir,
             )
-        manifest_path = run_dir / EVIDENCE_MANIFEST
-        if manifest_path.is_file():
-            manifest = read_json(manifest_path)
-        else:
-            manifest = {"schema_version": 1, "items": []}
         items = manifest.get("items")
         if not isinstance(items, list):
             raise RunStateError("invalid evidence manifest")
@@ -931,5 +1236,8 @@ def attach_evidence(run_dir: Path, source: Path, *, max_bytes: int = MAX_EVIDENC
         }
         if not any(isinstance(item, dict) and item.get("sha256") == sha256 for item in items):
             items.append(entry)
-            atomic_write_json(manifest_path, manifest)
+            atomic_write_json(
+                run_dir / EVIDENCE_MANIFEST,
+                {"schema_version": 1, "items": items},
+            )
         return entry

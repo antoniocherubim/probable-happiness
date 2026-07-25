@@ -20,9 +20,140 @@ MANIFEST_FILENAME = "reviewed_manifest.json"
 SUMMARY_FILENAME = "technical_summary.json"
 TELEGRAM_CHUNK_LIMIT = 3500
 
+_TECHNICAL_SUMMARY_KEYS = frozenset(
+    {
+        "schema_version",
+        "task_id",
+        "task_title",
+        "repository",
+        "base_commit",
+        "iteration",
+        "max_iterations",
+        "reviewed_diff_hash",
+        "files",
+        "file_count",
+        "additions",
+        "deletions",
+        "executor_summary",
+        "test_counts",
+        "test_commands",
+        "validation_status",
+        "reviewer_status",
+        "reviewer_summary",
+        "findings",
+        "residual_risks",
+        "documentation",
+        "prepared_at",
+        "telegram_messages",
+    }
+)
+_TECHNICAL_SUMMARY_REQUIRED = frozenset(
+    {
+        "schema_version",
+        "task_id",
+        "task_title",
+        "repository",
+        "base_commit",
+        "iteration",
+        "max_iterations",
+        "reviewed_diff_hash",
+        "files",
+        "file_count",
+        "additions",
+        "deletions",
+        "executor_summary",
+        "test_counts",
+        "test_commands",
+        "validation_status",
+        "reviewer_status",
+        "reviewer_summary",
+        "findings",
+        "residual_risks",
+        "documentation",
+        "prepared_at",
+    }
+)
+
 
 class SnapshotError(ValueError):
     """The working snapshot is unsafe, incomplete, or no longer reviewed."""
+
+
+def validate_technical_summary(document: dict[str, Any]) -> dict[str, Any]:
+    """Refuse malformed, unknown-field, or future technical summaries."""
+    from .schemas import FUTURE_SCHEMA_REFUSAL
+
+    if not isinstance(document, dict):
+        raise SnapshotError("technical summary must be a JSON object")
+    unknown = set(document) - _TECHNICAL_SUMMARY_KEYS
+    if unknown:
+        raise SnapshotError("technical summary has unknown fields")
+    if not _TECHNICAL_SUMMARY_REQUIRED.issubset(document):
+        raise SnapshotError("technical summary missing required fields")
+    schema = document.get("schema_version")
+    if type(schema) is int and schema > 1:
+        raise SnapshotError(FUTURE_SCHEMA_REFUSAL)
+    if schema != 1:
+        raise SnapshotError("technical summary schema_version mismatch")
+
+    def _require_str(key: str) -> str:
+        value = document.get(key)
+        if not isinstance(value, str) or not value:
+            raise SnapshotError(f"technical summary field types are invalid ({key})")
+        return value
+
+    def _require_int(key: str, *, min_value: int | None = None) -> int:
+        value = document.get(key)
+        if type(value) is not int:
+            raise SnapshotError(f"technical summary field types are invalid ({key})")
+        if min_value is not None and value < min_value:
+            raise SnapshotError(f"technical summary field types are invalid ({key})")
+        return value
+
+    for key in (
+        "task_id",
+        "task_title",
+        "repository",
+        "base_commit",
+        "reviewed_diff_hash",
+        "executor_summary",
+        "validation_status",
+        "reviewer_status",
+        "reviewer_summary",
+        "prepared_at",
+    ):
+        _require_str(key)
+    _require_int("iteration", min_value=1)
+    _require_int("max_iterations", min_value=1)
+    _require_int("file_count", min_value=0)
+    _require_int("additions", min_value=0)
+    _require_int("deletions", min_value=0)
+    files = document.get("files")
+    if not isinstance(files, list) or not all(isinstance(item, str) for item in files):
+        raise SnapshotError("technical summary field types are invalid (files)")
+    if len(files) != document["file_count"]:
+        raise SnapshotError("technical summary file_count mismatch")
+    test_counts = document.get("test_counts")
+    if not isinstance(test_counts, dict) or not all(
+        type(value) is int for value in test_counts.values()
+    ):
+        raise SnapshotError("technical summary field types are invalid (test_counts)")
+    test_commands = document.get("test_commands")
+    if not isinstance(test_commands, list) or not all(
+        isinstance(item, str) for item in test_commands
+    ):
+        raise SnapshotError("technical summary field types are invalid (test_commands)")
+    for key in ("findings", "residual_risks", "documentation"):
+        value = document.get(key)
+        if not isinstance(value, list):
+            raise SnapshotError(f"technical summary field types are invalid ({key})")
+    messages = document.get("telegram_messages")
+    if messages is not None:
+        if not isinstance(messages, list) or not messages:
+            raise SnapshotError("technical summary telegram_messages malformed")
+        if not all(isinstance(item, str) and item for item in messages):
+            raise SnapshotError("technical summary telegram_messages malformed")
+    return document
 
 
 def _git_bytes(worktree: Path, *args: str) -> bytes:
@@ -221,64 +352,221 @@ def validate_documentation(
 
 
 def _task_title(worktree: Path, task_file: str, task_id: str) -> str:
+    from .persist import PersistError, secure_read_text
+
+    path = worktree / task_file
     try:
-        for line in (worktree / task_file).read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if stripped.startswith("# "):
-                title = stripped[2:].strip()
-                title = re.sub(
-                    rf"^{re.escape(task_id)}\s*(?:—|-|:)\s*",
-                    "",
-                    title,
-                    count=1,
-                    flags=re.IGNORECASE,
-                )
-                if title:
-                    return sanitize_text(title)[:240]
-    except (OSError, UnicodeError):
-        pass
+        text = secure_read_text(
+            path,
+            max_bytes=256 * 1024,
+            require_private=False,
+            containment_root=worktree,
+        )
+    except PersistError as exc:
+        message = str(exc).lower()
+        if "missing" in message:
+            return task_id
+        raise SnapshotError(f"task file cannot be read safely: {exc}") from exc
+    except FileNotFoundError:
+        return task_id
+    except (OSError, UnicodeError) as exc:
+        raise SnapshotError(f"task file cannot be read safely: {exc}") from exc
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            title = stripped[2:].strip()
+            title = re.sub(
+                rf"^{re.escape(task_id)}\s*(?:—|-|:)\s*",
+                "",
+                title,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            if title:
+                return sanitize_text(title)[:240]
     return task_id
 
 
-def _read_sanitized(path: Path, limit: int = 1600) -> str:
-    if not path.is_file():
-        return "não informado"
-    value = sanitize_text(path.read_text(encoding="utf-8", errors="replace")).strip()
-    if len(value) > limit:
-        return value[: limit - 24].rstrip() + " …[truncated field]"
-    return value or "não informado"
+_VALIDATION_RESULT_KEYS = frozenset(
+    {
+        "schema_version",
+        "phase",
+        "iteration",
+        "state",
+        "reason",
+        "exit_code",
+        "child_exit_code",
+        "elapsed_seconds",
+        "last_activity_at",
+        "changed_files",
+        "finished_at",
+    }
+)
+
+# Production Cursor Agent ``--output-format json`` result envelope (same contract
+# as resume/plan_resume). Synthetic ``{"summary": …}`` fixtures are refused.
+_CURSOR_AGENT_RESULT_KEYS = frozenset(
+    {
+        "type",
+        "subtype",
+        "is_error",
+        "duration_ms",
+        "duration_api_ms",
+        "result",
+        "session_id",
+        "request_id",
+        "usage",
+    }
+)
+_REVIEWER_REPORT_KEYS = frozenset(
+    {"status", "summary", "findings", "tests_required"}
+)
+_REVIEWER_STATUSES = frozenset({"APPROVED", "CHANGES_REQUESTED", "BLOCKED"})
+_FINDING_KEYS = frozenset({"severity", "title", "details", "files"})
+_FINDING_SEVERITIES = frozenset({"critical", "high", "medium", "low"})
+
+
+def _validate_validation_result(path: Path, data: Any) -> dict[str, Any]:
+    """Fail closed on corrupt/future/mistyped validation-*-result.json payloads."""
+    from .schemas import FUTURE_SCHEMA_REFUSAL
+
+    label = path.name
+    if not isinstance(data, dict):
+        raise SnapshotError(f"{label} must be a JSON object")
+    unknown = set(data) - _VALIDATION_RESULT_KEYS
+    if unknown:
+        raise SnapshotError(f"{label} has unknown fields")
+    schema = data.get("schema_version")
+    if type(schema) is int and schema > 1:
+        raise SnapshotError(FUTURE_SCHEMA_REFUSAL)
+    if schema != 1:
+        raise SnapshotError(f"{label} schema_version mismatch")
+    if not _VALIDATION_RESULT_KEYS.issubset(data):
+        raise SnapshotError(f"{label} missing required fields")
+    if (
+        not isinstance(data.get("phase"), str)
+        or not data["phase"]
+        or type(data.get("iteration")) is not int
+        or data["iteration"] < 1
+        or not isinstance(data.get("state"), str)
+        or not data["state"]
+        or (
+            data.get("reason") is not None
+            and not isinstance(data.get("reason"), str)
+        )
+        or type(data.get("exit_code")) is not int
+        or type(data.get("child_exit_code")) is not int
+        or type(data.get("elapsed_seconds")) not in {int, float}
+        or not isinstance(data.get("last_activity_at"), str)
+        or not data["last_activity_at"]
+        or type(data.get("changed_files")) is not int
+        or not isinstance(data.get("finished_at"), str)
+        or not data["finished_at"]
+    ):
+        raise SnapshotError(f"{label} field types are invalid")
+    return data
+
+
+def validate_reviewer_report(data: Any) -> dict[str, Any]:
+    """Fail closed on missing/unknown/mistyped reviewer report contracts."""
+    if not isinstance(data, dict) or set(data) != _REVIEWER_REPORT_KEYS:
+        raise SnapshotError("reviewer report has missing or unknown fields")
+    if data["status"] not in _REVIEWER_STATUSES:
+        raise SnapshotError("invalid reviewer status")
+    if (
+        not isinstance(data["summary"], str)
+        or not isinstance(data["tests_required"], list)
+        or not all(isinstance(item, str) for item in data["tests_required"])
+    ):
+        raise SnapshotError("invalid reviewer summary/tests_required")
+    if not isinstance(data["findings"], list):
+        raise SnapshotError("invalid reviewer findings")
+    for finding in data["findings"]:
+        if (
+            not isinstance(finding, dict)
+            or set(finding) != _FINDING_KEYS
+            or finding.get("severity") not in _FINDING_SEVERITIES
+            or not isinstance(finding.get("title"), str)
+            or not isinstance(finding.get("details"), str)
+            or not isinstance(finding.get("files"), list)
+            or not all(isinstance(item, str) for item in finding["files"])
+        ):
+            raise SnapshotError("malformed nested reviewer finding")
+    return data
+
+
+def _validate_executor_envelope(data: Any) -> dict[str, Any]:
+    """Fail closed unless the payload is the production Cursor Agent envelope."""
+    if not isinstance(data, dict):
+        raise SnapshotError("executor report must be a JSON object")
+    unknown = set(data) - _CURSOR_AGENT_RESULT_KEYS
+    if unknown:
+        raise SnapshotError("executor report has unknown fields")
+    if not _CURSOR_AGENT_RESULT_KEYS.issubset(data):
+        raise SnapshotError("executor report missing required fields")
+    if (
+        data.get("type") != "result"
+        or not isinstance(data.get("subtype"), str)
+        or not data["subtype"]
+        or type(data.get("is_error")) is not bool
+        or type(data.get("duration_ms")) is not int
+        or data["duration_ms"] < 0
+        or type(data.get("duration_api_ms")) is not int
+        or data["duration_api_ms"] < 0
+        or not isinstance(data.get("result"), str)
+        or not isinstance(data.get("session_id"), str)
+        or not data["session_id"]
+        or not isinstance(data.get("request_id"), str)
+        or not data["request_id"]
+        or not isinstance(data.get("usage"), dict)
+    ):
+        raise SnapshotError("executor report field types are invalid")
+    return data
 
 
 def _executor_summary(path: Path) -> tuple[str, list[str]]:
-    raw = _read_sanitized(path)
-    risks: list[str] = []
+    from .persist import PersistError, secure_read_json
+
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeError):
-        return raw, risks
-    if not isinstance(data, dict):
-        return raw, risks
-    for key in ("summary", "result", "message"):
-        if isinstance(data.get(key), str) and data[key].strip():
-            raw = sanitize_text(data[key].strip())[:1600]
-            break
-    value = data.get("risks") or data.get("residual_risks")
-    if isinstance(value, list):
-        risks = [sanitize_text(str(item))[:500] for item in value[:20]]
-    return raw, risks
+        data = secure_read_json(path, require_private=True)
+    except PersistError as exc:
+        message = str(exc).lower()
+        if "missing" in message:
+            return "não informado", []
+        raise SnapshotError(f"executor report cannot be read safely: {exc}") from exc
+    except (OSError, ValueError) as exc:
+        raise SnapshotError(f"executor report cannot be read safely: {exc}") from exc
+    validated = _validate_executor_envelope(data)
+    raw = sanitize_text(validated["result"].strip())[:1600]
+    return raw or "não informado", []
 
 
 _TEST_COUNT = re.compile(r"(?i)\b(\d+)\s+(passed|failed|skipped|errors?)\b")
 
 
 def _test_summary(run_dir: Path, executor_report: Path) -> tuple[dict[str, int], list[str]]:
+    from .persist import PersistError, secure_read_text
+
     counts = {"passed": 0, "failed": 0, "skipped": 0, "errors": 0}
     commands: list[str] = []
     sources = [executor_report, *sorted(run_dir.glob("validation-*.log"))]
     for source in sources:
-        if not source.is_file():
+        try:
+            source.lstat()
+        except FileNotFoundError:
+            # Absent inputs are skipped; present unsafe/corrupt inputs fail closed.
             continue
-        text = source.read_text(encoding="utf-8", errors="replace")
+        try:
+            text = secure_read_text(
+                source,
+                max_bytes=2 * 1024 * 1024,
+                require_private=True,
+                containment_root=run_dir if source.parent == run_dir else None,
+            )
+        except (OSError, PersistError, UnicodeError) as exc:
+            raise SnapshotError(
+                f"validation input cannot be read safely ({source.name}): {exc}"
+            ) from exc
         for number, label in _TEST_COUNT.findall(text):
             normalized = "errors" if label.lower().startswith("error") else label.lower()
             counts[normalized] += int(number)
@@ -317,9 +605,13 @@ def prepare_review_artifacts(
         task_slug=task_slug,
     )
     try:
-        reviewer = json.loads(reviewer_report.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        from .persist import PersistError, secure_read_json
+
+        reviewer_raw = secure_read_json(reviewer_report, require_private=True)
+    except (OSError, PersistError, ValueError) as exc:
         raise SnapshotError(f"invalid reviewer report: {exc}") from exc
+    # Validate the full reviewer + executor envelopes before any derived publish.
+    reviewer = validate_reviewer_report(reviewer_raw)
     executor_summary, risks = _executor_summary(executor_report)
     counts, commands = _test_summary(run_dir, executor_report)
     numstat = _git_bytes(worktree, "diff", "--numstat", "--no-renames", base_commit, "--")
@@ -363,27 +655,41 @@ def prepare_review_artifacts(
             raise SnapshotError(f"cannot count untracked diff lines: {relative}") from exc
         if b"\0" not in data:
             additions += data.count(b"\n") + int(bool(data) and not data.endswith(b"\n"))
-    findings = reviewer.get("findings") if isinstance(reviewer, dict) else []
     safe_findings: list[dict[str, str]] = []
-    if isinstance(findings, list):
-        for finding in findings[:30]:
-            if isinstance(finding, dict):
-                safe_findings.append(
-                    {
-                        "severity": sanitize_text(str(finding.get("severity", "")))[:40],
-                        "title": sanitize_text(str(finding.get("title", "")))[:300],
-                        "details": sanitize_text(str(finding.get("details", "")))[:800],
-                    }
-                )
-    validation_results = [
-        read_json(path)
-        for path in sorted(run_dir.glob("validation-*-result.json"))
-        if path.is_file()
-    ]
+    for finding in reviewer["findings"][:30]:
+        safe_findings.append(
+            {
+                "severity": sanitize_text(finding["severity"])[:40],
+                "title": sanitize_text(finding["title"])[:300],
+                "details": sanitize_text(finding["details"])[:800],
+            }
+        )
+    validation_results = []
+    for path in sorted(run_dir.glob("validation-*-result.json")):
+        from .persist import PersistError, secure_lstat_regular, secure_read_json
+
+        try:
+            secure_lstat_regular(path, require_private=True)
+        except PersistError as exc:
+            raise SnapshotError(
+                f"validation result cannot be read safely ({path.name}): {exc}"
+            ) from exc
+        try:
+            raw = secure_read_json(
+                path, require_private=True, containment_root=run_dir
+            )
+        except (OSError, PersistError, ValueError) as exc:
+            raise SnapshotError(
+                f"validation result cannot be read safely ({path.name}): {exc}"
+            ) from exc
+        validation_results.append(_validate_validation_result(path, raw))
+    # Resolve task title before publishing so symlink/unsafe task files fail
+    # closed without writing reviewed_manifest.json / technical_summary.json.
+    task_title = _task_title(worktree, task_file, task_id)
     summary = {
         "schema_version": 1,
         "task_id": task_id,
-        "task_title": _task_title(worktree, task_file, task_id),
+        "task_title": task_title,
         "repository": repo.name,
         "base_commit": base_commit,
         "iteration": iteration,

@@ -81,7 +81,24 @@ def make_exhausted_run(
     iteration_path.chmod(0o600)
     cursor_path = run_dir / "cursor-3.json"
     cursor_path.write_text(
-        json.dumps({"summary": "executor iteration 3"}),
+        json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "duration_ms": 1,
+                "duration_api_ms": 1,
+                "result": "executor iteration 3",
+                "session_id": "00000000-0000-0000-0000-000000000001",
+                "request_id": "00000000-0000-0000-0000-000000000002",
+                "usage": {
+                    "inputTokens": 0,
+                    "outputTokens": 0,
+                    "cacheReadTokens": 0,
+                    "cacheWriteTokens": 0,
+                },
+            }
+        ),
         encoding="utf-8",
     )
     cursor_path.chmod(0o600)
@@ -127,7 +144,26 @@ def make_exhausted_run(
             "recorded_at": "2026-07-23T00:00:00Z",
         },
     )
-    transition_run(run_dir, RunEvent.RUN_BLOCKED)
+    from dx.txn import LogicalTransaction
+
+    txn = LogicalTransaction(
+        run_dir=run_dir,
+        event=RunEvent.RUN_BLOCKED.value,
+        status_event=RunEvent.RUN_BLOCKED,
+        origin="runner",
+    )
+    txn.add_json(
+        "failure.json",
+        {
+            "schema_version": 1,
+            "reason": reason,
+            "phase": "loop",
+            "iteration": 3,
+            "report": "review-3.json",
+            "recorded_at": "2026-07-23T00:00:00Z",
+        },
+    )
+    txn.commit()
     return {
         "repo": repo,
         "worktree": worktree,
@@ -163,7 +199,26 @@ def test_replay_after_each_interruption_point_never_adds_twice(tmp_path: Path) -
     first = authorize_iteration_extension(env["run_dir"], 3)
 
     # Crash after ledger but before status.
-    transition_run(env["run_dir"], RunEvent.RUN_BLOCKED)
+    from dx.txn import LogicalTransaction
+
+    txn = LogicalTransaction(
+        run_dir=env["run_dir"],
+        event=RunEvent.RUN_BLOCKED.value,
+        status_event=RunEvent.RUN_BLOCKED,
+        origin="runner",
+    )
+    txn.add_json(
+        "failure.json",
+        {
+            "schema_version": 1,
+            "reason": "max_review_iterations",
+            "phase": "loop",
+            "iteration": 3,
+            "report": "review-3.json",
+            "recorded_at": "2026-07-23T00:00:00Z",
+        },
+    )
+    txn.commit()
     pending_plan = plan_resume(env["run_dir"])
     assert pending_plan["resume_phase"] == "executor"
     assert pending_plan["iteration"] == 4
@@ -359,7 +414,7 @@ def _write_fake_agents(tmp_path: Path, reviewer_status: str) -> tuple[Path, Path
             last="${!#}"
             printf '%s' "$last" > "$AGENT_LOOP_RUN_DIR/captured-executor-prompt.txt"
             printf 'iteration\\n' >> "$AGENT_LOOP_WORKTREE/app.txt"
-            printf '%s\\n' '{"summary":"executor continued; 1 passed, 0 failed"}'
+            printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"duration_api_ms":1,"result":"executor continued; 1 passed, 0 failed","session_id":"00000000-0000-0000-0000-000000000001","request_id":"00000000-0000-0000-0000-000000000002","usage":{"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0}}'
             """
         ),
         encoding="utf-8",

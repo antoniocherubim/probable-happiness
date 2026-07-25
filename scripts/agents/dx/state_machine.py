@@ -185,6 +185,66 @@ def read_status(run_dir: Path | str) -> str:
     return state.value if state is not None else ""
 
 
+def _transition_under_lock(
+    run_path: Path,
+    typed_event: RunEvent,
+    *,
+    expected: frozenset[RunState | None] | None,
+    record_audit: bool,
+) -> TransitionResult:
+    """CAS body under an already-held ``.state.lock``.
+
+    Callers that reach here for critical events must already have validated
+    ``CRITICAL_BINDINGS`` (``LogicalTransaction`` only). The public
+    ``transition_run`` refuses those events before acquiring the lock.
+    """
+    from .txn import TransactionError, commit_status_with_audit_locked
+
+    spec = TRANSITIONS[typed_event]
+    current = read_state(run_path)
+    if expected is not None and current not in expected:
+        raise StateTransitionError(
+            f"event {typed_event.value} expected "
+            f"{sorted(state.value if state else '<empty>' for state in expected)}, "
+            f"got {current.value if current else '<empty>'}"
+        )
+    if current == spec.target:
+        if not spec.idempotent:
+            raise StateTransitionError(
+                f"event {typed_event.value} is not replayable from "
+                f"{spec.target.value}"
+            )
+        return TransitionResult(
+            event=typed_event,
+            previous=current,
+            current=current,
+            result="already_applied",
+        )
+    if current not in spec.sources:
+        raise StateTransitionError(
+            f"event {typed_event.value} cannot transition "
+            f"{current.value if current else '<empty>'} to {spec.target.value}"
+        )
+    if record_audit:
+        try:
+            commit_status_with_audit_locked(
+                run_path, event=typed_event, origin="runner"
+            )
+        except TransactionError as exc:
+            raise StateTransitionError(str(exc)) from exc
+    else:
+        atomic_write_text(
+            run_path / STATUS_FILENAME,
+            spec.target.value,
+        )
+    return TransitionResult(
+        event=typed_event,
+        previous=current,
+        current=spec.target,
+        result="applied",
+    )
+
+
 def transition_run(
     run_dir: Path | str,
     event: RunEvent | str,
@@ -198,10 +258,23 @@ def transition_run(
     When ``record_audit`` is True, status publication and audit append are
     bound through the logical transaction journal so a crash between them
     recovers to a complete event (never status without audit).
+
+    Critical artifact-bearing events are always refused here. Only
+    ``LogicalTransaction``, after validating ``CRITICAL_BINDINGS`` and matching
+    ``event``/``status_event``/payloads, may publish them via the private
+    under-lock helper. Idempotent replay through this public API is not enough:
+    destination state alone never proves the bound artifact. There is no
+    caller-controlled bypass flag.
     """
     run_path = Path(run_dir)
     typed_event = _coerce_event(event)
-    spec = TRANSITIONS[typed_event]
+    from .txn import CRITICAL_BINDINGS
+
+    if typed_event.value in CRITICAL_BINDINGS:
+        raise StateTransitionError(
+            f"event {typed_event.value} requires LogicalTransaction with "
+            "bound artifacts; refusing artifactless status/audit mutation"
+        )
     expected = (
         frozenset(_coerce_state(value) for value in expected_states)
         if expected_states is not None
@@ -213,51 +286,11 @@ def transition_run(
         else run_scoped_lock(run_path, lock_name=STATE_LOCK_FILENAME)
     )
     with lock:
-        current = read_state(run_path)
-        if expected is not None and current not in expected:
-            raise StateTransitionError(
-                f"event {typed_event.value} expected "
-                f"{sorted(state.value if state else '<empty>' for state in expected)}, "
-                f"got {current.value if current else '<empty>'}"
-            )
-        if current == spec.target:
-            if not spec.idempotent:
-                raise StateTransitionError(
-                    f"event {typed_event.value} is not replayable from "
-                    f"{spec.target.value}"
-                )
-            return TransitionResult(
-                event=typed_event,
-                previous=current,
-                current=current,
-                result="already_applied",
-            )
-        if current not in spec.sources:
-            raise StateTransitionError(
-                f"event {typed_event.value} cannot transition "
-                f"{current.value if current else '<empty>'} to {spec.target.value}"
-            )
-        if record_audit:
-            # Journal binds status + audit. Artifact-bearing critical events
-            # must go through LogicalTransaction (enforced inside helper).
-            from .txn import TransactionError, commit_status_with_audit_locked
-
-            try:
-                commit_status_with_audit_locked(
-                    run_path, event=typed_event, origin="runner"
-                )
-            except TransactionError as exc:
-                raise StateTransitionError(str(exc)) from exc
-        else:
-            atomic_write_text(
-                run_path / STATUS_FILENAME,
-                spec.target.value,
-            )
-        return TransitionResult(
-            event=typed_event,
-            previous=current,
-            current=spec.target,
-            result="applied",
+        return _transition_under_lock(
+            run_path,
+            typed_event,
+            expected=expected,
+            record_audit=record_audit,
         )
 
 

@@ -54,6 +54,8 @@ from .snapshot import (
     prepare_review_artifacts,
     reject_nonignored_special_files,
     validate_documentation,
+    validate_reviewer_report,
+    validate_technical_summary,
 )
 from .state_machine import (
     STATE_LOCK_FILENAME,
@@ -148,17 +150,34 @@ def cmd_create_request(args: argparse.Namespace) -> int:
     )
     messages = None
     summary_path = Path(args.run_dir) / SUMMARY_FILENAME
-    if summary_path.is_file():
+    try:
+        summary_path.lstat()
+        present = True
+    except FileNotFoundError:
+        present = False
+    if present:
         try:
-            technical = json.loads(summary_path.read_text(encoding="utf-8"))
+            from .persist import PersistError, secure_read_json
+
+            technical = secure_read_json(
+                summary_path,
+                require_private=True,
+                containment_root=Path(args.run_dir),
+            )
+            technical = validate_technical_summary(technical)
             configured = technical.get("telegram_messages")
-            if isinstance(configured, list) and configured and all(
-                isinstance(item, str) for item in configured
-            ):
+            if configured is not None:
                 messages = configured
                 summary = configured[0]
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            messages = None
+        except SnapshotError as exc:
+            print(f"ERROR: technical summary is invalid: {exc}", file=sys.stderr)
+            return 1
+        except PersistError as exc:
+            print(f"ERROR: technical summary cannot be read safely: {exc}", file=sys.stderr)
+            return 1
+        except (OSError, UnicodeError, ValueError) as exc:
+            print(f"ERROR: technical summary is invalid: {exc}", file=sys.stderr)
+            return 1
     try:
         request = create_approval_request(
             run_dir=Path(args.run_dir),
@@ -428,21 +447,31 @@ def cmd_resume_exec(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    run_candidate = Path(args.run_dir).expanduser()
-    if run_candidate.is_symlink() or not run_candidate.is_dir():
+    from .persist import (
+        PersistError,
+        assert_path_components_unlinked,
+        revalidate_lock_fd,
+        secure_acquire_lock_fd,
+    )
+
+    try:
+        run_dir = assert_path_components_unlinked(Path(args.run_dir).expanduser())
+    except PersistError as exc:
+        print(f"ERROR: run directory path is unsafe: {exc}", file=sys.stderr)
+        return 1
+    try:
+        dir_info = run_dir.lstat()
+    except FileNotFoundError:
         print("ERROR: run directory must be a regular directory", file=sys.stderr)
         return 1
-    run_dir = run_candidate.resolve()
+    if stat.S_ISLNK(dir_info.st_mode) or not stat.S_ISDIR(dir_info.st_mode):
+        print("ERROR: run directory must be a regular directory", file=sys.stderr)
+        return 1
     try:
-        fd = os.open(
-            run_dir / ".resume.lock",
-            os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-        )
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError("resume lock is not a regular file")
+        fd = secure_acquire_lock_fd(run_dir, ".resume.lock")
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (BlockingIOError, OSError) as exc:
+        revalidate_lock_fd(run_dir, ".resume.lock", fd)
+    except (BlockingIOError, OSError, PersistError, ValueError) as exc:
         print(f"ERROR: cannot lock run for resume: {exc}", file=sys.stderr)
         return 1
     os.set_inheritable(fd, True)
@@ -602,38 +631,15 @@ def cmd_prepare_review_artifacts(args: argparse.Namespace) -> int:
 
 
 def cmd_review_status(args: argparse.Namespace) -> int:
+    from .persist import PersistError, secure_read_json
+
     try:
-        data = json.loads(Path(args.file).read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        data = secure_read_json(Path(args.file), require_private=True)
+        validated = validate_reviewer_report(data)
+    except (OSError, PersistError, SnapshotError, ValueError) as exc:
         print(f"ERROR: invalid reviewer report: {exc}", file=sys.stderr)
         return 1
-    if not isinstance(data, dict) or set(data) != {"status", "summary", "findings", "tests_required"}:
-        print("ERROR: reviewer report has missing or unknown fields", file=sys.stderr)
-        return 1
-    if data["status"] not in {"APPROVED", "CHANGES_REQUESTED", "BLOCKED"}:
-        print("ERROR: invalid reviewer status", file=sys.stderr)
-        return 1
-    if not isinstance(data["summary"], str) or not isinstance(data["tests_required"], list) or not all(
-        isinstance(item, str) for item in data["tests_required"]
-    ):
-        print("ERROR: invalid reviewer summary/tests_required", file=sys.stderr)
-        return 1
-    if not isinstance(data["findings"], list):
-        print("ERROR: invalid reviewer findings", file=sys.stderr)
-        return 1
-    for finding in data["findings"]:
-        if (
-            not isinstance(finding, dict)
-            or set(finding) != {"severity", "title", "details", "files"}
-            or finding.get("severity") not in {"critical", "high", "medium", "low"}
-            or not isinstance(finding.get("title"), str)
-            or not isinstance(finding.get("details"), str)
-            or not isinstance(finding.get("files"), list)
-            or not all(isinstance(item, str) for item in finding["files"])
-        ):
-            print("ERROR: invalid reviewer finding", file=sys.stderr)
-            return 1
-    print(data["status"])
+    print(validated["status"])
     return 0
 
 
@@ -649,8 +655,8 @@ def cmd_transition_state(args: argparse.Namespace) -> int:
 
 def cmd_record_failure(args: argparse.Namespace) -> int:
     from .approval import utc_now_iso
-    from .persist import PersistError, secure_lstat_regular, secure_read_text
-    from .txn import TransactionError, commit_status_and_artifacts
+    from .persist import PersistError, secure_read_json, secure_read_text
+    from .txn import TransactionError, _validate_failure_payload, commit_status_and_artifacts
 
     run_dir = Path(args.run_dir)
     try:
@@ -672,10 +678,15 @@ def cmd_record_failure(args: argparse.Namespace) -> int:
             lock_name=STATE_LOCK_FILENAME,
         )
     except (OSError, StateTransitionError, TransactionError, ValueError, PersistError) as exc:
-        # Replay: if already BLOCKED with a regular failure.json, succeed idempotently.
-        # Symlinks at failure.json or status must not be treated as success.
+        # Replay: only succeed when already BLOCKED with a contract-valid
+        # failure.json. Corrupt/future/mismatched artifacts must not be blessed.
         try:
-            secure_lstat_regular(run_dir / "failure.json", require_private=True)
+            existing = secure_read_json(
+                run_dir / "failure.json",
+                require_private=True,
+                containment_root=run_dir,
+            )
+            _validate_failure_payload(existing)
             status = secure_read_text(
                 run_dir / "status",
                 max_bytes=128,
@@ -684,7 +695,7 @@ def cmd_record_failure(args: argparse.Namespace) -> int:
             ).strip()
             if status == "BLOCKED":
                 return 0
-        except (OSError, PersistError, ValueError):
+        except (OSError, PersistError, TransactionError, ValueError):
             pass
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

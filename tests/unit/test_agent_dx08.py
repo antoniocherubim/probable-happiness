@@ -454,7 +454,28 @@ def test_human_decision_crash_before_status_recovers(tmp_path: Path) -> None:
     transition_run(run_dir, RunEvent.RUN_STARTED)
     transition_run(run_dir, RunEvent.REVIEW_STARTED)
     transition_run(run_dir, RunEvent.REVIEW_APPROVED)
-    transition_run(run_dir, RunEvent.APPROVAL_REQUESTED)
+    request = {
+        "schema_version": 1,
+        "technical_status": "APPROVED",
+        "task": "docs/tasks/DX-08.md",
+        "task_id": "DX-08",
+        "run_id": run_dir.name,
+        "base_commit": "abc",
+        "worktree": "/tmp/wt",
+        "review_report": "review.json",
+        "diff_hash": "a" * 64,
+        "callback_token": "b" * 32,
+        "token_consumed": False,
+        "created_at": "2026-07-25T00:00:00Z",
+    }
+    txn = LogicalTransaction(
+        run_dir=run_dir,
+        event=RunEvent.APPROVAL_REQUESTED.value,
+        status_event=RunEvent.APPROVAL_REQUESTED,
+        origin="runner",
+    )
+    txn.add_json("human_approval_request.json", request)
+    txn.commit()
     # Force AWAITING without going through full approval API.
     (run_dir / "status").write_text("AWAITING_HUMAN_APPROVAL\n", encoding="utf-8")
     _chmod_private(run_dir / "status")
@@ -463,11 +484,14 @@ def test_human_decision_crash_before_status_recovers(tmp_path: Path) -> None:
         "decision": "approve",
         "run_id": run_dir.name,
         "diff_hash": "a" * 64,
-        "callback_token": "c" * 32,
+        "callback_token": "b" * 32,
         "telegram_user_id": 1,
         "telegram_chat_id": 1,
         "decided_at": "2026-07-25T00:00:00Z",
     }
+    # Mark the durable request consumed so recovery binds decision↔request.
+    request["token_consumed"] = True
+    atomic_write_json(run_dir / "human_approval_request.json", request)
     _write_journal(
         run_dir,
         _journal_doc(
@@ -476,7 +500,10 @@ def test_human_decision_crash_before_status_recovers(tmp_path: Path) -> None:
             event=RunEvent.HUMAN_APPROVED.value,
             status_event=RunEvent.HUMAN_APPROVED.value,
             previous_state="AWAITING_HUMAN_APPROVAL",
-            artifacts={"human_approval_decision.json": decision},
+            artifacts={
+                "human_approval_request.json": request,
+                "human_approval_decision.json": decision,
+            },
             exclusive=["human_approval_decision.json"],
             origin="bridge",
         ),

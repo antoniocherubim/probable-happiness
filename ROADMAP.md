@@ -37,9 +37,10 @@ Commit, integração e push permanecem ações manuais fora do runner estável.
 - [x] DX-06C: delivery remoto removido e integração Git tornada manual;
 - [x] DX-07: máquina de estados tipada com CAS, lock e writers centralizados
   (implementada; aguardando revisão formal);
-- [x] DX-08: persistência segura com API no-follow (containment sem seguir
-  symlink), journal sob `.state.lock`, audit, migrations com dry-run/rollback
-  validados e fsync de diretório (implementada; aguardando revisão formal);
+- [ ] DX-08: persistência segura — candidato WIP após review 3; correções
+  fatiadas em [DX-08A](docs/tasks/DX-08A.md) (autoridade/locks/I/O; implementada,
+  aguarda revisão) e [DX-08B](docs/tasks/DX-08B.md) (migration/backup/rollback;
+  planejada). Não tratar DX-08/M1 como fechados até ambas + revisão formal;
 - [x] suíte local com testes determinísticos;
 - [x] aprovação local não cria commit, branch ou job de rede.
 
@@ -56,11 +57,28 @@ Commit, integração e push permanecem ações manuais fora do runner estável.
 | M6 | P1 | Operação e documentação para terceiros | M4–M5 |
 | M7 | Gate | Alpha externa, beta pública e release estável | M0–M6 |
 
-Próxima entrega recomendada: **DX-09 / M2 — cgroups e limites de
-recursos/saída**. O marco M1 (DX-07 + DX-08) está implementado com evidência de
-suíte (359 passed); ambas as tasks aguardam revisão formal. Riscos residuais da
-DX-08 (outbox fora do create, fixtures sintéticas, matriz de fault injection não
-exaustiva por evento) estão documentados em `docs/tasks/DX-08.md`.
+Próxima entrega recomendada: **DX-08B** (fechar correções de migration/backup
+do review 3 da DX-08), depois revisão formal de DX-07/DX-08A/DX-08B antes de
+avançar para DX-09 / M2. DX-08A provou localmente que a API pública não promove
+estado crítico sem artefato vinculado com contrato semântico (request
+`technical_status`/`diff_hash`/`callback_token`, decisão/rejeição, cadeia
+completa de iteration-budget, schemas futuros), que replay no estado-destino
+exige binding contrato-válido no disco (ausente/corrupt/future-schema recusam
+sem mutação; `failure.json` válido diferente é first-failure-wins sem
+reescrever), que resume de EXECUTING/REVIEWING aceita o envelope real do
+Cursor Agent `--output-format json` (`type`/`subtype`/`result`/`session_id`/
+`usage`/…) e recusa o fixture sintético `{"summary":…}`, que
+`review-status` e `prepare_review_artifacts` leem reviewer/executor/validation
+com `require_private=True` (0644/0666 recusados sem mutar bytes/modo) e
+validam o contrato completo do reviewer e o envelope do executor antes de
+qualquer publicação derivada (manifest/summary seed permanecem byte-idênticos),
+que task symlinkada e `validation-*-result.json` future-schema falham fechados
+sem republicar artefatos, que reports privados zero-byte, logs/resultados
+symlinkados, findings aninhados malformados e evidence com manifesto inválido +
+fonte nova falham fechados sem resíduo, e que locks recusam nomes reservados,
+symlink intermediário e troca de inode pós-flock também em `cmd_resume_exec` /
+`authorize_iteration_extension` / `_probe_delivery_lock` (445 passed na suíte
+unitária); M1 permanece aberto até DX-08B e revisão formal.
 
 ### Tasks preparadas até M2
 
@@ -71,7 +89,9 @@ exaustiva por evento) estão documentados em `docs/tasks/DX-08.md`.
 | 3 | M0 | [DX-06B](docs/tasks/DX-06B.md) | experimento de staging/push não aprovado |
 | 4 | M0 | [DX-06C](docs/tasks/DX-06C.md) | concluída: aprovação local terminal |
 | 5 | M1 | [DX-07](docs/tasks/DX-07.md) | implementada; aguarda revisão formal |
-| 6 | M1 | [DX-08](docs/tasks/DX-08.md) | implementada; aguarda revisão formal |
+| 6 | M1 | [DX-08](docs/tasks/DX-08.md) | candidata; review 3 abriu DX-08A/DX-08B |
+| 6a | M1 | [DX-08A](docs/tasks/DX-08A.md) | implementada; aguarda revisão formal |
+| 6b | M1 | [DX-08B](docs/tasks/DX-08B.md) | planejada: migration/backup/rollback |
 | 7 | M2 | [DX-09](docs/tasks/DX-09.md) | cgroups e limites de recursos/saída |
 | 8 | M2 | [DX-10](docs/tasks/DX-10.md) | segredos por fase, streaming e retenção segura |
 
@@ -108,7 +128,8 @@ Tasks: [DX-05](docs/tasks/DX-05.md), [DX-06](docs/tasks/DX-06.md) e
 Resultado: toda transição é válida, condicionada, auditável e recuperável após
 queda abrupta.
 
-Tasks: [DX-07](docs/tasks/DX-07.md) e [DX-08](docs/tasks/DX-08.md).
+Tasks: [DX-07](docs/tasks/DX-07.md), [DX-08](docs/tasks/DX-08.md),
+[DX-08A](docs/tasks/DX-08A.md) e [DX-08B](docs/tasks/DX-08B.md).
 
 ### Trabalho
 
@@ -120,34 +141,50 @@ Tasks: [DX-07](docs/tasks/DX-07.md) e [DX-08](docs/tasks/DX-08.md).
   owner e modo (`require_private=True` nos caminhos de produção; inspect/migrate
   legados podem relaxar explicitamente; containment não resolve symlinks);
 - [x] usar `umask 077`, diretórios `0700` e arquivos sensíveis `0600`;
-- [x] executar `fsync` do diretório após `replace`, link e criação de artefatos
-  (CLI `persist-text`/`publish-file` no runner; FS sem suporte falha fechado);
+- [x] executar `fsync` do arquivo e do diretório após replace/link; aplicar modo
+  e re-fsync do arquivo antes de publicar (DX-08A);
+- [x] recusar eventos críticos artifactless; somente `LogicalTransaction` com
+  binding (`event`↔`status_event` + contrato semântico do artefato, incluindo
+  request/decision) aplica status via helper privado — sem flag pública
+  spoofável (DX-08A);
+- [x] locks inseguros falham sem `chmod`/replace; lock novo `0600` + dir fsync;
+  owner/dir/inode-swap cobertos em teste (DX-08A);
 - [x] vincular `authorized_at`, `updated_at` e cada entrada do ledger à cadeia
   de integridade;
 - [x] escolher e documentar o modelo de ameaça:
   - baseline: processos com o mesmo UID são confiáveis;
   - hardened: não anunciado nesta release (exige chave inacessível ao executor);
-- [x] criar migrations versionadas para run, profile, approval e ledger
-  (dry-run/futuro sem mutação; rollback remove criados e valida hashes);
+- [ ] criar migrations versionadas para run, profile, approval e ledger com
+  preflight/backup/rollback sem mutação indevida (DX-08B; candidata DX-08 ainda
+  não é confiável para migration);
 - [x] avaliar SQLite/WAL vs JSON+journal (ADR-001 escolheu JSON+journal).
 
 ### Critérios de saída
 
-- nenhuma API pública consegue promover um run `BLOCKED` ou não aprovado;
-- fault injection cobre fronteiras da API comum (write/fsync/replace/dir fsync)
-  e journals preparing/committing dos eventos críticos testados; matriz
-  exaustiva por **cada** evento DX-07 ainda é risco residual documentado;
+- nenhuma API pública consegue promover um run `BLOCKED` ou não aprovado sem o
+  artefato vinculado (provado em DX-08A, incluindo recusa de bypass spoofado,
+  mismatch event/status, matriz semântica decision/request e matriz de replay
+  no estado-destino com binding ausente/corrupt/future/mismatched; suíte local
+  445 passed);
+- fault injection cobre fronteiras da API comum (write completo/short-write/
+  fsync/chmod/segundo fsync/replace/link/dir fsync); matriz exaustiva por
+  **cada** evento DX-07 ainda é risco residual;
 - qualquer arquivo truncado, symlink, modo/owner incorreto ou schema futuro falha
-  fechado e com diagnóstico acionável (resume e migration);
+  fechado e com diagnóstico acionável (resume com envelope Cursor Agent real,
+  snapshot/report zero-byte, `review-status`/`prepare_review_artifacts` com
+  modo 0644/0666 e contratos malformados de reviewer/executor sem republicar
+  manifest/summary, task symlinkada e validation result future-schema,
+  technical summary, evidence sem publicar blob antes do manifesto, validation
+  logs/results symlinkados, e reap do supervisor em falha de heartbeat/status
+  em DX-08A; migration ainda depende de DX-08B);
 - runs das duas versões persistidas anteriores migram ou recusam retomada sem
-  mutação;
+  mutação (pendente DX-08B);
 - o baseline declara o mesmo UID como fronteira de confiança; se um modo
   hardened for anunciado, ele demonstra que o executor não consegue forjar
   aprovação ou extensão.
 
-M1 implementação: DX-07 + DX-08 entregues com evidência de testes (359 passed);
-revisão formal ainda pendente antes de marcar o marco como fechado
-operacionalmente.
+M1 permanece **aberto**: DX-07 e DX-08A implementadas com evidência local;
+DX-08B e revisão formal ainda pendentes. Não declarar o marco concluído.
 
 ## M2 — Limitar processos, recursos e exposição de segredos
 

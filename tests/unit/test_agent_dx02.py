@@ -385,18 +385,47 @@ def test_resume_plans_executor_reviewer_changes_and_rejects_review_drift(tmp_pat
     _repo, worktree, run_dir, base = make_run(tmp_path)
     transition_run(run_dir, RunEvent.RUN_STARTED)
     (run_dir / "cursor-1.json").write_bytes(b"")
+    os.chmod(run_dir / "cursor-1.json", 0o600)
+    with pytest.raises(RunStateError, match="empty or truncated"):
+        plan_resume(run_dir)
+
+    (run_dir / "cursor-1.json").write_text(
+        json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "duration_ms": 1,
+                "duration_api_ms": 1,
+                "result": "ok",
+                "session_id": "00000000-0000-0000-0000-000000000001",
+                "request_id": "00000000-0000-0000-0000-000000000002",
+                "usage": {
+                    "inputTokens": 0,
+                    "outputTokens": 0,
+                    "cacheReadTokens": 0,
+                    "cacheWriteTokens": 0,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(run_dir / "cursor-1.json", 0o600)
     assert plan_resume(run_dir)["resume_phase"] == "executor"
 
-    (run_dir / "cursor-1.json").write_text('{"summary":"ok"}\n', encoding="utf-8")
     transition_run(run_dir, RunEvent.REVIEW_STARTED)
     from dx.approval import compute_diff_hash
 
     snapshot = compute_diff_hash(worktree, base)
-    (run_dir / "review-1-snapshot.json").write_text(
+    snapshot_path = run_dir / "review-1-snapshot.json"
+    snapshot_path.write_text(
         json.dumps({"schema_version": 1, "iteration": 1, "diff_hash": snapshot}),
         encoding="utf-8",
     )
+    os.chmod(snapshot_path, 0o600)
     (run_dir / "review-1.json").write_bytes(b"")
+    os.chmod(run_dir / "review-1.json", 0o600)
     assert plan_resume(run_dir)["resume_phase"] == "reviewer"
 
     transition_run(run_dir, RunEvent.REVIEW_CHANGES_REQUESTED)
@@ -466,7 +495,26 @@ def test_evidence_accepts_regular_file_and_rejects_unsafe_types(
 
 def test_resumed_review_opens_telegram_gate_and_approval_verifies(tmp_path: Path) -> None:
     _repo, worktree, run_dir, _base = make_run(tmp_path)
-    transition_run(run_dir, RunEvent.RUN_BLOCKED)
+    from dx.txn import LogicalTransaction
+
+    txn = LogicalTransaction(
+        run_dir=run_dir,
+        event=RunEvent.RUN_BLOCKED.value,
+        status_event=RunEvent.RUN_BLOCKED,
+        origin="runner",
+    )
+    txn.add_json(
+        "failure.json",
+        {
+            "schema_version": 1,
+            "reason": "test",
+            "phase": "loop",
+            "iteration": 1,
+            "report": None,
+            "recorded_at": "2026-07-25T00:00:00Z",
+        },
+    )
+    txn.commit()
     evidence = tmp_path / "standalone-review.txt"
     evidence.write_text("untrusted supporting evidence\n", encoding="utf-8")
     attach_evidence(run_dir, evidence)

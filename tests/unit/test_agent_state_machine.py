@@ -26,6 +26,167 @@ from dx.state_machine import (  # noqa: E402
     read_state,
     transition_run,
 )
+from dx.txn import CRITICAL_BINDINGS, LogicalTransaction  # noqa: E402
+
+
+ALL_STATES = (None, *RunState)
+ALL_EVENT_STATE_PAIRS = tuple(
+    (event, state) for event in RunEvent for state in ALL_STATES
+)
+
+FAILURE_ARTIFACT = {
+    "schema_version": 1,
+    "reason": "test",
+    "phase": "loop",
+    "iteration": 0,
+    "report": None,
+    "recorded_at": "2026-07-25T00:00:00Z",
+}
+
+
+def apply_critical(run_dir: Path, event: RunEvent) -> None:
+    """Publish a critical event with the required bound artifact."""
+    required = next(iter(CRITICAL_BINDINGS[event.value]))
+    txn = LogicalTransaction(
+        run_dir=run_dir,
+        event=event.value,
+        status_event=event,
+        origin="runner",
+    )
+    if required == "failure.json":
+        txn.add_json("failure.json", dict(FAILURE_ARTIFACT))
+    elif required == "human_approval_request.json":
+        txn.add_json(
+            "human_approval_request.json",
+            {
+                "schema_version": 1,
+                "technical_status": "APPROVED",
+                "task": "docs/tasks/DX-08A.md",
+                "task_id": "DX-08A",
+                "run_id": run_dir.name,
+                "base_commit": "abc",
+                "worktree": "/tmp/wt",
+                "review_report": "review.json",
+                "diff_hash": "a" * 64,
+                "callback_token": "b" * 32,
+                "token_consumed": False,
+                "created_at": "2026-07-25T00:00:00Z",
+            },
+        )
+    elif required == "human_approval_decision.json":
+        txn.add_json(
+            "human_approval_request.json",
+            {
+                "schema_version": 1,
+                "technical_status": "APPROVED",
+                "task": "docs/tasks/DX-08A.md",
+                "task_id": "DX-08A",
+                "run_id": run_dir.name,
+                "base_commit": "abc",
+                "worktree": "/tmp/wt",
+                "review_report": "review.json",
+                "diff_hash": "a" * 64,
+                "callback_token": "b" * 32,
+                "token_consumed": True,
+                "created_at": "2026-07-25T00:00:00Z",
+            },
+        )
+        txn.add_json(
+            "human_approval_decision.json",
+            {
+                "schema_version": 1,
+                "decision": "approve",
+                "run_id": run_dir.name,
+                "diff_hash": "a" * 64,
+                "callback_token": "b" * 32,
+                "telegram_user_id": 1,
+                "telegram_chat_id": 1,
+                "decided_at": "2026-07-25T00:00:00Z",
+            },
+        )
+    elif required == "human_rejection.json":
+        txn.add_json(
+            "human_approval_request.json",
+            {
+                "schema_version": 1,
+                "technical_status": "APPROVED",
+                "task": "docs/tasks/DX-08A.md",
+                "task_id": "DX-08A",
+                "run_id": run_dir.name,
+                "base_commit": "abc",
+                "worktree": "/tmp/wt",
+                "review_report": "review.json",
+                "diff_hash": "a" * 64,
+                "callback_token": "b" * 32,
+                "token_consumed": True,
+                "created_at": "2026-07-25T00:00:00Z",
+            },
+        )
+        txn.add_json(
+            "human_rejection.json",
+            {
+                "schema_version": 1,
+                "decision": "reject",
+                "run_id": run_dir.name,
+                "diff_hash": "a" * 64,
+                "telegram_user_id": 1,
+                "telegram_chat_id": 1,
+                "decided_at": "2026-07-25T00:00:00Z",
+                "reason": "no",
+            },
+        )
+    elif required == "iteration-budget.json":
+        import hashlib
+        import json
+        import os
+
+        from dx.persist import secure_write_json
+        from dx.runstate import MAX_REVIEW_REASON, _extension_id
+
+        iteration = 3
+        review = {
+            "status": "CHANGES_REQUESTED",
+            "summary": "need more",
+            "findings": [],
+            "tests_required": [],
+        }
+        review_text = json.dumps(review, indent=2, sort_keys=True) + "\n"
+        review_path = run_dir / f"review-{iteration}.json"
+        review_path.write_text(review_text, encoding="utf-8")
+        os.chmod(review_path, 0o600)
+        diff_hash = "c" * 64
+        secure_write_json(
+            run_dir / f"review-{iteration}-snapshot.json",
+            {"schema_version": 1, "iteration": iteration, "diff_hash": diff_hash},
+        )
+        entry = {
+            "idempotency_id": "x" * 64,
+            "additional_iterations": 2,
+            "previous_limit": 3,
+            "effective_limit": 5,
+            "origin": "cli",
+            "authorized_at": "2026-07-25T00:00:00Z",
+            "authorized_at_iteration": iteration,
+            "review_file": f"review-{iteration}.json",
+            "review_sha256": hashlib.sha256(review_text.encode("utf-8")).hexdigest(),
+            "reviewed_diff_hash": diff_hash,
+            "blocked_reason": MAX_REVIEW_REASON,
+        }
+        entry["idempotency_id"] = _extension_id(run_dir.name, entry)
+        txn.add_json(
+            "iteration-budget.json",
+            {
+                "schema_version": 1,
+                "run_id": run_dir.name,
+                "original_limit": 3,
+                "effective_limit": 5,
+                "extensions": [entry],
+                "updated_at": "2026-07-25T00:00:00Z",
+            },
+        )
+    else:
+        raise AssertionError(f"unhandled critical artifact {required}")
+    txn.commit()
 
 
 ALL_STATES = (None, *RunState)
@@ -372,10 +533,27 @@ def test_complete_transition_matrix(
     run_dir = tmp_path / f"{event.value}-{initial.value if initial else 'empty'}"
     set_state_fixture(run_dir, initial)
     before = (run_dir / "status").read_bytes() if initial is not None else None
+    names_before = {p.name for p in run_dir.iterdir()}
+    bytes_before = {
+        p.name: p.read_bytes() for p in run_dir.iterdir() if p.is_file()
+    }
     spec = TRANSITIONS[event]
     allowed = initial in spec.sources or (
         initial == spec.target and spec.idempotent
     )
+
+    if event.value in CRITICAL_BINDINGS:
+        # Artifactless public API must refuse before any mutation.
+        with pytest.raises(
+            StateTransitionError,
+            match="LogicalTransaction|bound artifacts",
+        ):
+            transition_run(run_dir, event)
+        assert {p.name for p in run_dir.iterdir()} == names_before
+        assert {
+            p.name: p.read_bytes() for p in run_dir.iterdir() if p.is_file()
+        } == bytes_before
+        return
 
     if allowed:
         result = transition_run(run_dir, event)
@@ -387,6 +565,8 @@ def test_complete_transition_matrix(
     else:
         with pytest.raises(StateTransitionError, match=f"event {event.value}"):
             transition_run(run_dir, event)
+        after = (run_dir / "status").read_bytes() if (run_dir / "status").exists() else None
+        assert after == before
         assert read_state(run_dir) == initial
         if before is not None:
             assert (run_dir / "status").read_bytes() == before
@@ -530,12 +710,10 @@ def test_run_blocked_from_each_documented_source(
     run_dir = tmp_path / f"block-from-{source.value if source else 'empty'}"
     set_state_fixture(run_dir, source)
 
-    result = transition_run(run_dir, RunEvent.RUN_BLOCKED)
+    apply_critical(run_dir, RunEvent.RUN_BLOCKED)
 
-    assert result.result == "applied"
-    assert result.previous == source
-    assert result.current == RunState.BLOCKED
     assert read_state(run_dir) == RunState.BLOCKED
+    assert (run_dir / "failure.json").is_file()
 
 
 def test_run_blocked_from_missing_status_is_startup_failure(tmp_path: Path) -> None:
@@ -544,11 +722,21 @@ def test_run_blocked_from_missing_status_is_startup_failure(tmp_path: Path) -> N
     run_dir.mkdir()
     assert read_state(run_dir) is None
 
-    result = transition_run(run_dir, RunEvent.RUN_BLOCKED)
+    apply_critical(run_dir, RunEvent.RUN_BLOCKED)
 
-    assert result.previous is None
-    assert result.current == RunState.BLOCKED
-    assert result.result == "applied"
+    assert read_state(run_dir) == RunState.BLOCKED
+    assert (run_dir / "failure.json").is_file()
+
+
+def test_run_blocked_artifactless_refused(tmp_path: Path) -> None:
+    run_dir = tmp_path / "fresh"
+    run_dir.mkdir()
+    with pytest.raises(StateTransitionError, match="bound artifacts"):
+        transition_run(run_dir, RunEvent.RUN_BLOCKED)
+    assert read_state(run_dir) is None
+    assert not (run_dir / "failure.json").exists()
+    assert not (run_dir / ".txn.json").exists()
+    assert not (run_dir / "audit-trail.json").exists()
 
 
 def test_production_has_only_one_status_writer() -> None:

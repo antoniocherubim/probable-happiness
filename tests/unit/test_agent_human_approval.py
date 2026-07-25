@@ -93,7 +93,26 @@ def _arm_technical_approved(run_dir: Path) -> None:
 
 
 def _block_run(run_dir: Path) -> None:
-    transition_run(run_dir, RunEvent.RUN_BLOCKED)
+    from dx.txn import LogicalTransaction
+
+    txn = LogicalTransaction(
+        run_dir=run_dir,
+        event=RunEvent.RUN_BLOCKED.value,
+        status_event=RunEvent.RUN_BLOCKED,
+        origin="runner",
+    )
+    txn.add_json(
+        "failure.json",
+        {
+            "schema_version": 1,
+            "reason": "test_block",
+            "phase": "loop",
+            "iteration": 0,
+            "report": None,
+            "recorded_at": "2026-07-25T00:00:00Z",
+        },
+    )
+    txn.commit()
 
 
 def test_diff_hash_stable_and_sensitive(git_worktree: tuple[Path, str]) -> None:
@@ -187,24 +206,31 @@ def test_callback_replay_repairs_status_after_decision_publication_crash(
         review_report="review.json",
     )
 
-    import dx.txn as txn_mod
+    import dx.state_machine as state_mod
 
-    original_transition_run = txn_mod.transition_run
+    original_transition = state_mod._transition_under_lock
     crash_once = {"armed": True}
 
     def crash_before_human_approved(
         target_run_dir: Path,
         event: object,
-        **kwargs: object,
+        *,
+        expected: object = None,
+        record_audit: bool = False,
     ) -> object:
         if event == RunEvent.HUMAN_APPROVED and crash_once["armed"]:
             crash_once["armed"] = False
             # Decision artifact must already be the real published file.
             assert (Path(target_run_dir) / "human_approval_decision.json").is_file()
             raise RuntimeError("simulated crash after decision publication")
-        return original_transition_run(target_run_dir, event, **kwargs)
+        return original_transition(
+            target_run_dir,
+            event,
+            expected=expected,
+            record_audit=record_audit,
+        )
 
-    monkeypatch.setattr(txn_mod, "transition_run", crash_before_human_approved)
+    monkeypatch.setattr(state_mod, "_transition_under_lock", crash_before_human_approved)
 
     with pytest.raises(RuntimeError, match="simulated crash after decision publication"):
         _approve(run_dir, request, user_id=9)

@@ -8,14 +8,12 @@ from __future__ import annotations
 
 import fcntl
 import os
-import stat
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
 from .persist import (
     PersistError,
-    ensure_private_dir,
     fsync_directory,
     secure_exclusive_write_json,
     secure_read_json,
@@ -62,32 +60,26 @@ def run_scoped_lock(
     """
     Exclusive flock for a run directory.
 
-    Each acquisition opens its own FD so threads in the same process serialize
-    correctly (flock is per open-file description).
+    Validates the directory and lock via ``lstat`` / ``O_NOFOLLOW`` / ``fstat``
+    before ``flock``, then revalidates the pathname inode after locking.
+    Insecure existing locks (mode, owner, hard link, symlink, inode swap) are
+    refused without ``chmod``, replace, or other mutation. Newly created locks
+    are ``0600`` and the parent directory is fsynced.
     """
+    from .persist import PersistError, revalidate_lock_fd, secure_acquire_lock_fd
+
     run_dir = Path(run_dir)
-    if run_dir.exists():
-        info = run_dir.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            raise ValueError(f"run directory must be a regular directory: {run_dir}")
-    else:
-        ensure_private_dir(run_dir)
-    lock_path = run_dir / lock_name
-    fd = os.open(
-        str(lock_path),
-        os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
-        0o600,
-    )
     try:
-        os.chmod(lock_path, 0o600)
-    except OSError:
-        pass
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
-        os.close(fd)
-        raise ValueError(f"lock path is not a regular file: {lock_path}")
+        fd = secure_acquire_lock_fd(run_dir, lock_name)
+    except PersistError as exc:
+        raise ValueError(str(exc)) from exc
     try:
         operation = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
         fcntl.flock(fd, operation)
+        try:
+            revalidate_lock_fd(run_dir, lock_name, fd)
+        except PersistError as exc:
+            raise ValueError(str(exc)) from exc
         yield
     finally:
         try:

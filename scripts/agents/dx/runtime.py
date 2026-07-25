@@ -172,24 +172,29 @@ def supervise_command(
                     if changed != previous_changed:
                         activity.touch()
                         previous_changed = changed
+                    from .state_machine import read_status
+
                     try:
-                        run_state = (run_dir / "status").read_text(encoding="utf-8").strip()
-                    except OSError:
-                        run_state = ""
-                    payload = {
-                        "schema_version": 1,
-                        "phase": phase,
-                        "iteration": iteration,
-                        "elapsed_seconds": int(now - started),
-                        "pid": process.pid,
-                        "process_group": process.pid,
-                        "last_activity_at": activity.get(),
-                        "changed_files": changed,
-                        "state": run_state or "active",
-                        "process_state": "active",
-                        "observed_at": _now(),
-                    }
-                    atomic_write_json(heartbeat_path, payload)
+                        run_state = read_status(run_dir)
+                        payload = {
+                            "schema_version": 1,
+                            "phase": phase,
+                            "iteration": iteration,
+                            "elapsed_seconds": int(now - started),
+                            "pid": process.pid,
+                            "process_group": process.pid,
+                            "last_activity_at": activity.get(),
+                            "changed_files": changed,
+                            "state": run_state or "active",
+                            "process_state": "active",
+                            "observed_at": _now(),
+                        }
+                        atomic_write_json(heartbeat_path, payload)
+                    except Exception:
+                        # Fail-closed: never leave the supervised group running
+                        # after a status/heartbeat publication failure.
+                        _terminate_group(process, terminate_grace_seconds)
+                        raise
                     print(
                         f"[agent-loop] {phase.capitalize()} iteration={iteration} active "
                         f"elapsed={_elapsed(now - started)} pid={process.pid} pgid={process.pid} "
@@ -201,7 +206,12 @@ def supervise_command(
             if process.poll() is None:
                 _terminate_group(process, terminate_grace_seconds)
             return_code = process.wait()
+        except BaseException:
+            _terminate_group(process, terminate_grace_seconds)
+            raise
         finally:
+            if process.poll() is None:
+                _terminate_group(process, terminate_grace_seconds)
             for signum, handler in previous_handlers.items():
                 signal.signal(signum, handler)
         for thread in threads:
