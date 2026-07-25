@@ -17,8 +17,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 AGENTS = REPO_ROOT / "scripts" / "agents"
 sys.path.insert(0, str(AGENTS))
 
-from dx.approval import compute_diff_hash, read_status, write_status  # noqa: E402
-from dx.atomic import atomic_write_json  # noqa: E402
+from dx.approval import compute_diff_hash, read_status  # noqa: E402
+from dx.atomic import atomic_write_json, atomic_write_text  # noqa: E402
 from dx.profile import ProjectProfile  # noqa: E402
 from dx.runstate import (  # noqa: E402
     ITERATION_BUDGET,
@@ -29,6 +29,7 @@ from dx.runstate import (  # noqa: E402
     plan_resume,
     write_run_metadata,
 )
+from dx.state_machine import RunEvent, transition_run  # noqa: E402
 
 
 def git(repo: Path, *args: str) -> str:
@@ -121,7 +122,7 @@ def make_exhausted_run(
             "recorded_at": "2026-07-23T00:00:00Z",
         },
     )
-    write_status(run_dir, "BLOCKED")
+    transition_run(run_dir, RunEvent.RUN_BLOCKED)
     return {
         "repo": repo,
         "worktree": worktree,
@@ -157,7 +158,7 @@ def test_replay_after_each_interruption_point_never_adds_twice(tmp_path: Path) -
     first = authorize_iteration_extension(env["run_dir"], 3)
 
     # Crash after ledger but before status.
-    write_status(env["run_dir"], "BLOCKED")
+    transition_run(env["run_dir"], RunEvent.RUN_BLOCKED)
     pending_plan = plan_resume(env["run_dir"])
     assert pending_plan["resume_phase"] == "executor"
     assert pending_plan["iteration"] == 4
@@ -167,7 +168,7 @@ def test_replay_after_each_interruption_point_never_adds_twice(tmp_path: Path) -
 
     # Crash before/during iteration 4 executor.
     (env["run_dir"] / "iteration").write_text("4\n", encoding="utf-8")
-    write_status(env["run_dir"], "EXECUTING")
+    transition_run(env["run_dir"], RunEvent.EXECUTOR_STARTED)
     third = authorize_iteration_extension(env["run_dir"], 3)
     assert third["result"] == "idempotent_replay"
     assert third["idempotency_id"] == first["idempotency_id"]
@@ -250,7 +251,9 @@ def test_approval_and_delivery_states_are_never_extendable(
     status: str,
 ) -> None:
     env = make_exhausted_run(tmp_path)
-    write_status(env["run_dir"], status)
+    # Fixture for active and historical terminal states. A real run cannot
+    # transition out of BLOCKED into any of these states.
+    atomic_write_text(env["run_dir"] / "status", status)
     with pytest.raises(IterationBudgetError, match=status):
         authorize_iteration_extension(env["run_dir"], 3)
     assert not (env["run_dir"] / ITERATION_BUDGET).exists()

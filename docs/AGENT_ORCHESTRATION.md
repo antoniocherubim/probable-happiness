@@ -168,6 +168,11 @@ bot somente nesse processo; não existe worker de push no produto estável.
 
 ## Estados e falhas
 
+Todas as mudanças abaixo passam pela máquina central de eventos sob
+`.state.lock`. Replays idempotentes não reescrevem `status`; uma aresta
+incompatível falha sem mutação. A ordem quando há composição é
+`.resume.lock` → `.approval.lock` → `.state.lock`.
+
 - `EXECUTING`: Cursor trabalhando;
 - `REVIEWING`: Codex avaliando;
 - `CHANGES_REQUESTED`: feedback retornará ao Cursor;

@@ -34,6 +34,7 @@ from dx.approval import (  # noqa: E402
     wait_for_decision,
 )
 from dx.atomic import exclusive_write_json  # noqa: E402
+from dx.state_machine import RunEvent, transition_run  # noqa: E402
 
 _BINDING_KEYS = (
     "task",
@@ -86,7 +87,13 @@ def _approve(run_dir: Path, request: dict, user_id: int = 42) -> tuple[str, dict
 
 def _arm_technical_approved(run_dir: Path) -> None:
     """Mirror run_task: record technical APPROVED before opening the human gate."""
-    approval_mod.write_status(run_dir, STATUS_APPROVED)
+    transition_run(run_dir, RunEvent.RUN_STARTED)
+    transition_run(run_dir, RunEvent.REVIEW_STARTED)
+    transition_run(run_dir, RunEvent.REVIEW_APPROVED)
+
+
+def _block_run(run_dir: Path) -> None:
+    transition_run(run_dir, RunEvent.RUN_BLOCKED)
 
 
 def test_diff_hash_stable_and_sensitive(git_worktree: tuple[Path, str]) -> None:
@@ -180,18 +187,22 @@ def test_callback_replay_repairs_status_after_decision_publication_crash(
         review_report="review.json",
     )
 
-    original_write_status = approval_mod.write_status
+    original_transition_run = approval_mod.transition_run
     crash_once = {"armed": True}
 
-    def crash_before_human_approved(target_run_dir: Path, status: str) -> None:
-        if status == STATUS_HUMAN_APPROVED and crash_once["armed"]:
+    def crash_before_human_approved(
+        target_run_dir: Path,
+        event: RunEvent,
+        **kwargs: object,
+    ) -> object:
+        if event == RunEvent.HUMAN_APPROVED and crash_once["armed"]:
             crash_once["armed"] = False
             # Decision artifact must already be the real published file.
             assert (Path(target_run_dir) / "human_approval_decision.json").is_file()
             raise RuntimeError("simulated crash after decision publication")
-        original_write_status(target_run_dir, status)
+        return original_transition_run(target_run_dir, event, **kwargs)
 
-    monkeypatch.setattr(approval_mod, "write_status", crash_before_human_approved)
+    monkeypatch.setattr(approval_mod, "transition_run", crash_before_human_approved)
 
     with pytest.raises(RuntimeError, match="simulated crash after decision publication"):
         _approve(run_dir, request, user_id=9)
@@ -434,7 +445,7 @@ def test_wait_timeout_preserves_blocked_and_token_unclaimable(
         worktree=worktree,
         review_report="review.json",
     )
-    approval_mod.write_status(run_dir, STATUS_BLOCKED)
+    _block_run(run_dir)
     token = request["callback_token"]
 
     assert wait_for_decision(run_dir, timeout_sec=1, poll_interval=0.2) is False
@@ -902,7 +913,7 @@ def test_interrupted_awaiting_publication_recovers_without_token_rotation(
     )
     _arm_technical_approved(blocked_dir)
     blocked_req = create_approval_request(**blocked_kwargs)
-    approval_mod.write_status(blocked_dir, STATUS_BLOCKED)
+    _block_run(blocked_dir)
     assert read_status(blocked_dir) == STATUS_BLOCKED
     blocked_again = create_approval_request(**blocked_kwargs)
     assert blocked_again["callback_token"] == blocked_req["callback_token"]
@@ -1104,7 +1115,7 @@ def test_blocked_with_no_request_cannot_open_gate(
     worktree, base = git_worktree
     run_dir = tmp_path / "runs" / "run-blocked-no-request"
     run_dir.mkdir(parents=True)
-    approval_mod.write_status(run_dir, STATUS_BLOCKED)
+    _block_run(run_dir)
 
     with pytest.raises(ApprovalError, match="only open from technical APPROVED"):
         create_approval_request(
@@ -1139,7 +1150,7 @@ def test_blocked_with_identical_request_no_op_without_reopening(
         review_report="review.json",
         task_id="DX-01",
     )
-    approval_mod.write_status(run_dir, STATUS_BLOCKED)
+    _block_run(run_dir)
     token = request["callback_token"]
 
     again = create_approval_request(
@@ -1660,7 +1671,7 @@ def test_sent_marker_cannot_consume_replacement_notification(
     )
     assert first is not None
 
-    approval_mod.write_status(run_dir, STATUS_BLOCKED)
+    _block_run(run_dir)
     replacement = enqueue_notification(
         run_dir=run_dir,
         kind="blocked",

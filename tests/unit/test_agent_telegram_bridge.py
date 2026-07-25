@@ -19,10 +19,10 @@ from dx.approval import (  # noqa: E402
     enqueue_notification,
     load_decision,
     read_status,
-    write_status,
 )
 from dx.bridge import Bridge  # noqa: E402
 from dx.config import BridgeConfig, ConfigError, load_bridge_config  # noqa: E402
+from dx.state_machine import RunEvent, transition_run  # noqa: E402
 from dx.telegram import FakeTelegramAPI, TelegramClient  # noqa: E402
 
 
@@ -30,6 +30,12 @@ ALLOWED_USER = 1001
 ALLOWED_CHAT = 1001
 OTHER_USER = 2002
 TOKEN = "123456:TEST-TOKEN-NOT-REAL"
+
+
+def mark_review_approved(run_dir: Path) -> None:
+    transition_run(run_dir, RunEvent.RUN_STARTED)
+    transition_run(run_dir, RunEvent.REVIEW_STARTED)
+    transition_run(run_dir, RunEvent.REVIEW_APPROVED)
 
 
 @pytest.mark.parametrize(
@@ -81,7 +87,7 @@ def bridge_env(tmp_path: Path, git_worktree: tuple[Path, str]) -> dict:
     runs_root = tmp_path / "runs"
     run_dir = runs_root / "dx-01-bridge"
     run_dir.mkdir(parents=True)
-    write_status(run_dir, STATUS_APPROVED)
+    mark_review_approved(run_dir)
     request = create_approval_request(
         run_dir=run_dir,
         task="docs/tasks/DX-01.md",
@@ -232,7 +238,7 @@ def test_replay_and_foreign_callback(bridge_env: dict, tmp_path: Path) -> None:
     # Other run token must not alter this run.
     other = bridge_env["runs_root"] / "other-run"
     other.mkdir()
-    write_status(other, STATUS_APPROVED)
+    mark_review_approved(other)
     other_req = create_approval_request(
         run_dir=other,
         task="docs/tasks/OTHER.md",

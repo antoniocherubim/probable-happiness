@@ -15,24 +15,23 @@ from typing import Any
 
 from .atomic import (
     atomic_write_json,
-    atomic_write_text,
     exclusive_write_json,
     read_json,
     run_scoped_lock,
 )
+from .state_machine import RunEvent, RunState, read_status, transition_run
 
-STATUS_APPROVED = "APPROVED"
-STATUS_AWAITING = "AWAITING_HUMAN_APPROVAL"
-STATUS_HUMAN_APPROVED = "HUMAN_APPROVED"
-STATUS_BLOCKED = "BLOCKED"
-STATUS_DELIVERING = "DELIVERING"
-STATUS_PUSHED = "PUSHED"
-STATUS_DELIVERY_FAILED = "DELIVERY_FAILED"
+STATUS_APPROVED = RunState.APPROVED.value
+STATUS_AWAITING = RunState.AWAITING_HUMAN_APPROVAL.value
+STATUS_HUMAN_APPROVED = RunState.HUMAN_APPROVED.value
+STATUS_BLOCKED = RunState.BLOCKED.value
+STATUS_DELIVERING = RunState.DELIVERING.value
+STATUS_PUSHED = RunState.PUSHED.value
+STATUS_DELIVERY_FAILED = RunState.DELIVERY_FAILED.value
 
 REQUEST_FILENAME = "human_approval_request.json"
 DECISION_FILENAME = "human_approval_decision.json"
 NOTIFY_FILENAME = "telegram_notify.json"
-STATUS_FILENAME = "status"
 LOCK_FILENAME = ".approval.lock"
 
 SCHEMA_VERSION = 1
@@ -61,17 +60,6 @@ def utc_now_iso() -> str:
 
 def run_id_from_dir(run_dir: Path) -> str:
     return Path(run_dir).name
-
-
-def write_status(run_dir: Path, status: str) -> None:
-    atomic_write_text(Path(run_dir) / STATUS_FILENAME, status)
-
-
-def read_status(run_dir: Path) -> str:
-    path = Path(run_dir) / STATUS_FILENAME
-    if not path.is_file():
-        return ""
-    return path.read_text(encoding="utf-8").strip()
 
 
 def _security_binding(payload: dict[str, Any]) -> dict[str, str]:
@@ -262,7 +250,7 @@ def create_approval_request(
             # Interrupted after atomic request publish but before AWAITING:
             # promote technical APPROVED → AWAITING so the callback can claim.
             if status == STATUS_APPROVED:
-                write_status(run_dir, STATUS_AWAITING)
+                transition_run(run_dir, RunEvent.APPROVAL_REQUESTED)
             # AWAITING: idempotent. BLOCKED / HUMAN_APPROVED / other: no-op
             # (never reopen or downgrade).
             return existing
@@ -294,7 +282,7 @@ def create_approval_request(
         # AWAITING before the lock is released so claims cannot observe a
         # half-published gate.
         atomic_write_json(request_path, request)
-        write_status(run_dir, STATUS_AWAITING)
+        transition_run(run_dir, RunEvent.APPROVAL_REQUESTED)
         return request
 
 
@@ -318,8 +306,8 @@ def _awaiting_button_publish_allowed_locked(run_dir: Path) -> dict[str, Any] | N
         except ApprovalError:
             pass
         else:
-            if read_status(run_dir) != STATUS_HUMAN_APPROVED:
-                write_status(run_dir, STATUS_HUMAN_APPROVED)
+            if read_status(run_dir) == STATUS_AWAITING:
+                transition_run(run_dir, RunEvent.RECOVER_HUMAN_APPROVED)
             return None
     try:
         return read_json(request_path)
@@ -499,13 +487,18 @@ def _idempotent_replay_locked(
     write), repair status while still holding the lock so bridge/waiters
     observe the repaired persisted state.
     """
-    if read_status(run_dir) not in {
+    current = read_status(run_dir)
+    if current == STATUS_AWAITING:
+        transition_run(run_dir, RunEvent.RECOVER_HUMAN_APPROVED)
+    elif current not in {
         STATUS_HUMAN_APPROVED,
         STATUS_DELIVERING,
         STATUS_PUSHED,
         STATUS_DELIVERY_FAILED,
     }:
-        write_status(run_dir, STATUS_HUMAN_APPROVED)
+        raise ApprovalError(
+            f"valid decision cannot recover incompatible status {current!r}"
+        )
     return "idempotent_replay", existing
 
 
@@ -576,7 +569,7 @@ def _claim_human_approval_locked(
             return _idempotent_replay_locked(run_dir, existing)
         return "rejected_wrong_state", existing or {}
 
-    write_status(run_dir, STATUS_HUMAN_APPROVED)
+    transition_run(run_dir, RunEvent.HUMAN_APPROVED)
     return "accepted", decision
 
 
@@ -691,13 +684,17 @@ def _decision_ready_locked(run_dir: Path) -> bool:
         validate_decision_matches_request(run_dir)
     except ApprovalError:
         return False
-    if read_status(run_dir) not in {
+    current = read_status(run_dir)
+    if current == STATUS_AWAITING:
+        transition_run(run_dir, RunEvent.RECOVER_HUMAN_APPROVED)
+        return True
+    if current not in {
         STATUS_HUMAN_APPROVED,
         STATUS_DELIVERING,
         STATUS_PUSHED,
         STATUS_DELIVERY_FAILED,
     }:
-        write_status(run_dir, STATUS_HUMAN_APPROVED)
+        return False
     return True
 
 
@@ -825,5 +822,5 @@ def apply_human_rejection(
                 "decided_at": utc_now_iso(),
             },
         )
-        write_status(run_dir, STATUS_BLOCKED)
+        transition_run(run_dir, RunEvent.HUMAN_REJECTED)
         return "rejected"

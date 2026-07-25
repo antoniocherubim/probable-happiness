@@ -9,6 +9,10 @@ heartbeat, validações e documentação obrigatória em
 podem ser retomados sem descartar o worktree, e evidência complementar permanece
 não confiável até nova revisão. Veja [Perfil e retomada segura](docs/PROJECT_PROFILE.md).
 
+As mudanças de estado passam por uma tabela tipada e compare-and-set sob
+`.state.lock`; eventos inválidos falham sem substituir o estado anterior.
+Estados históricos de delivery são somente leitura e não voltam ao fluxo ativo.
+
 O projeto ainda está em estágio pré-alpha. O caminho até uma distribuição
 confiável para terceiros, com gates objetivos de segurança, CI, empacotamento e
 release, está no [roadmap](ROADMAP.md).

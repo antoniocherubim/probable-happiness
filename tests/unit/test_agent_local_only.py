@@ -22,7 +22,6 @@ from dx.approval import (  # noqa: E402
     create_approval_request,
     enqueue_notification,
     read_status,
-    write_status,
 )
 from dx.bridge import Bridge  # noqa: E402
 from dx.config import BridgeConfig  # noqa: E402
@@ -35,6 +34,7 @@ from dx.snapshot import (  # noqa: E402
     split_telegram_message,
     validate_documentation,
 )
+from dx.state_machine import RunEvent, transition_run  # noqa: E402
 from dx.telegram import FakeTelegramAPI, TelegramClient  # noqa: E402
 
 
@@ -51,6 +51,12 @@ required_paths = ["docs/release/{task_id}.md"]
 [delivery]
 mode = "none"
 """
+
+
+def mark_review_approved(run_dir: Path) -> None:
+    transition_run(run_dir, RunEvent.RUN_STARTED)
+    transition_run(run_dir, RunEvent.REVIEW_STARTED)
+    transition_run(run_dir, RunEvent.REVIEW_APPROVED)
 
 
 def git(repo: Path, *args: str) -> str:
@@ -106,7 +112,7 @@ def make_local_run(tmp_path: Path, *, approve: bool = False) -> dict[str, object
         },
     )
     (run_dir / "iteration").write_text("1\n", encoding="utf-8")
-    write_status(run_dir, STATUS_APPROVED)
+    mark_review_approved(run_dir)
     reviewed_hash = build_snapshot_manifest(worktree, base)["snapshot_hash"]
     request = create_approval_request(
         run_dir=run_dir,

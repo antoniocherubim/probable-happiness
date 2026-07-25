@@ -17,10 +17,10 @@ from .approval import (
     read_status,
     utc_now_iso,
     validate_decision_matches_request,
-    write_status,
 )
 from .atomic import atomic_write_json, read_json, run_scoped_lock
 from .profile import ProfileError, load_project_profile
+from .state_machine import RunEvent, transition_run
 
 
 RUN_METADATA = "run.json"
@@ -412,8 +412,8 @@ def _authorize_iteration_extension_locked(
             reason, _failure = _failure_reason(run_dir)
             if reason in {MAX_REVIEW_REASON, LEGACY_MAX_REVIEW_REASON}:
                 try:
-                    write_status(run_dir, "CHANGES_REQUESTED")
-                except OSError:
+                    transition_run(run_dir, RunEvent.ITERATION_BUDGET_EXTENDED)
+                except (OSError, ValueError):
                     # plan_resume also recognizes this pending-ledger state.
                     pass
         return {
@@ -527,8 +527,8 @@ def _authorize_iteration_extension_locked(
     # pending authorization. This status change makes the normal path explicit.
     status_transition = "completed"
     try:
-        write_status(run_dir, "CHANGES_REQUESTED")
-    except OSError:
+        transition_run(run_dir, RunEvent.ITERATION_BUDGET_EXTENDED)
+    except (OSError, ValueError):
         status_transition = "pending_recovery"
     return {
         "result": "authorized",
