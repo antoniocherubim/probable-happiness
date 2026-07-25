@@ -1,0 +1,29 @@
+schema_version = 1
+
+[executor]
+timeout_seconds = 3600
+heartbeat_seconds = 30
+
+[reviewer]
+timeout_seconds = 3600
+heartbeat_seconds = 30
+
+[environment]
+required = []
+
+[validation]
+commands = [
+  ["python3", "-m", "compileall", "-q", "scripts/agents/dx"],
+  ["git", "diff", "--check"],
+]
+
+[documentation]
+required = true
+required_paths = [
+  "ROADMAP.md",
+  "docs/tasks/{task_id}.md",
+]
+
+[policy]
+missing_profile = "deny"
+terminate_grace_seconds = 5

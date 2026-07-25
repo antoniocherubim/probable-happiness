@@ -48,10 +48,11 @@ quando configurado, publique apenas uma branch segura e auditável.
 | M6 | P1 | Operação e documentação para terceiros | M4–M5 |
 | M7 | Gate | Alpha externa, beta pública e release estável | M0–M6 |
 
-Próxima entrega recomendada: **DX-06 / M0 — worker Git endurecido e unidades
-systemd**. A DX-05 já removeu Git do callback e enfileira `delivery-job.json`;
-a DX-06 fecha a fronteira operacional (env mínimo, hooks off, unidade
-separada sem token Telegram).
+Próxima entrega recomendada: **DX-06B / M0 — contexto Git confiável e delivery
+por allowlist positiva**. A candidata DX-06 separou processos e produziu
+hardening útil, mas não foi aprovada: revisões demonstraram que bloquear
+configurações executáveis do Git uma a uma não converge. DX-06B move build e
+push para staging limpo, sem carregar config/`info/*` do projeto.
 
 ### Tasks preparadas até M2
 
@@ -59,17 +60,19 @@ separada sem token Telegram).
 |---|---|---|---|
 | 1 | M0 | [DX-05](docs/tasks/DX-05.md) | aprovação enfileira delivery; bridge não executa Git |
 | 2 | M0 | [DX-06](docs/tasks/DX-06.md) | worker Git endurecido e unidades systemd separadas |
-| 3 | M1 | [DX-07](docs/tasks/DX-07.md) | máquina de estados central e transições condicionais |
-| 4 | M1 | [DX-08](docs/tasks/DX-08.md) | persistência segura, durável e migrável |
-| 5 | M2 | [DX-09](docs/tasks/DX-09.md) | cgroups e limites de recursos/saída |
-| 6 | M2 | [DX-10](docs/tasks/DX-10.md) | segredos por fase, streaming e retenção segura |
+| 3 | M0 | [DX-06B](docs/tasks/DX-06B.md) | staging Git limpo; config do projeto não executa |
+| 4 | M1 | [DX-07](docs/tasks/DX-07.md) | máquina de estados central e transições condicionais |
+| 5 | M1 | [DX-08](docs/tasks/DX-08.md) | persistência segura, durável e migrável |
+| 6 | M2 | [DX-09](docs/tasks/DX-09.md) | cgroups e limites de recursos/saída |
+| 7 | M2 | [DX-10](docs/tasks/DX-10.md) | segredos por fase, streaming e retenção segura |
 
 ## M0 — Separar Telegram de delivery Git
 
 Resultado: o processo que conhece o token Telegram nunca executa Git no
 repositório-alvo.
 
-Tasks: [DX-05](docs/tasks/DX-05.md) e [DX-06](docs/tasks/DX-06.md).
+Tasks: [DX-05](docs/tasks/DX-05.md), [DX-06](docs/tasks/DX-06.md) e
+[DX-06B](docs/tasks/DX-06B.md).
 
 ### Trabalho
 
@@ -78,10 +81,14 @@ Tasks: [DX-05](docs/tasks/DX-05.md) e [DX-06](docs/tasks/DX-06.md).
 - [ ] criar worker separado, sem `AGENT_TELEGRAM_BOT_TOKEN`;
 - [ ] usar ambiente Git allowlisted e remover variáveis `AGENT_*`, `GIT_*` não
   autorizadas, askpass e prompts interativos;
+- [ ] construir commit/push em staging Git limpo, sem carregar `.git/config`
+  ou `.git/info/*` do projeto;
+- [ ] aceitar somente remote descriptor/protocolos positivos e publicar um ref
+  exato, sem tags/refs adicionais;
 - [ ] desabilitar hooks no worker com configuração Git explícita;
 - [ ] aplicar timeout a `ls-remote`, criação de commit e push;
-- [ ] conceder ao worker escrita somente no Git common dir e no state root do
-  projeto selecionado;
+- [ ] manter worktree/Git common dir read-only e conceder escrita somente no
+  project state do projeto selecionado;
 - [ ] gerar unidades systemd distintas para bridge e worker;
 - [x] validar remote, branch, decisão, estado e snapshot novamente no worker;
 - [x] manter idempotência quando o commit ou remote OID já existir.
