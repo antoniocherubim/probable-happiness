@@ -35,7 +35,8 @@ Commit, integração e push permanecem ações manuais fora do runner estável.
 - [x] DX-05: experimento de fila/worker preservado no histórico e retirado da
   superfície estável;
 - [x] DX-06C: delivery remoto removido e integração Git tornada manual;
-- [x] DX-07: máquina de estados tipada com CAS, lock e writers centralizados;
+- [x] DX-07: máquina de estados tipada com CAS, lock e writers centralizados
+  (implementada; aguardando revisão formal);
 - [x] suíte local com testes determinísticos;
 - [x] aprovação local não cria commit, branch ou job de rede.
 
@@ -53,7 +54,8 @@ Commit, integração e push permanecem ações manuais fora do runner estável.
 | M7 | Gate | Alpha externa, beta pública e release estável | M0–M6 |
 
 Próxima entrega recomendada: **DX-08 / M1 — persistência segura, durável e
-migrável**. DX-07 centralizou as transições; DX-08 deve tornar atômicos e
+migrável**. DX-07 está implementada com evidência de suíte completa
+(314 passed) e aguarda revisão formal; DX-08 deve tornar atômicos e
 recuperáveis os pares entre estado, artefatos e notificações.
 
 ### Tasks preparadas até M2
@@ -64,7 +66,7 @@ recuperáveis os pares entre estado, artefatos e notificações.
 | 2 | M0 | [DX-06](docs/tasks/DX-06.md) | candidata de hardening não aprovada |
 | 3 | M0 | [DX-06B](docs/tasks/DX-06B.md) | experimento de staging/push não aprovado |
 | 4 | M0 | [DX-06C](docs/tasks/DX-06C.md) | concluída: aprovação local terminal |
-| 5 | M1 | [DX-07](docs/tasks/DX-07.md) | implementada: transições tipadas sob lock |
+| 5 | M1 | [DX-07](docs/tasks/DX-07.md) | implementada (314 passed); aguarda revisão formal |
 | 6 | M1 | [DX-08](docs/tasks/DX-08.md) | persistência segura, durável e migrável |
 | 7 | M2 | [DX-09](docs/tasks/DX-09.md) | cgroups e limites de recursos/saída |
 | 8 | M2 | [DX-10](docs/tasks/DX-10.md) | segredos por fase, streaming e retenção segura |

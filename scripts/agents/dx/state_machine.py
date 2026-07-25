@@ -66,6 +66,10 @@ class TransitionResult:
     result: str
 
 
+# Active nonterminal states plus missing status (None). Missing status is the
+# only pre-run_started condition; run_blocked intentionally allows ∅ → BLOCKED
+# so record-failure / early interrupt can close a run that never reached
+# EXECUTING (startup-failure semantics).
 _ACTIVE_NONTERMINAL = frozenset(
     {
         None,
