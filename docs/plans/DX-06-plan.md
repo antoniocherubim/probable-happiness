@@ -6,6 +6,9 @@ Atualizado após conclusão da DX-05 (2026-07-24).
 > adversarial demonstrar novas superfícies executáveis em config/`info/*` do
 > repositório. Não continuar a blacklist. O fechamento de M0 segue no
 > [plano DX-06B](DX-06B-plan.md), com staging Git limpo e allowlist positiva.
+>
+> **Decisão final:** DX-06B também foi encerrada sem aprovação. O produto
+> estável remove push automático em DX-06C.
 
 ## Estado herdado da DX-05 (não reabrir)
 

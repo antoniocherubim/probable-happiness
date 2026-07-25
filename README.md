@@ -4,7 +4,7 @@ Runner externo para executar uma task com Cursor Agent, revisar o resultado com
 Codex e exigir aprovação humana auditável pelo Telegram.
 
 Projetos consumidores podem declarar bootstrap, ambiente allowlisted, timeouts,
-heartbeat, validações, documentação obrigatória e entrega opt-in em branch em
+heartbeat, validações e documentação obrigatória em
 `.agent-loop/project.toml`. Runs interrompidos
 podem ser retomados sem descartar o worktree, e evidência complementar permanece
 não confiável até nova revisão. Veja [Perfil e retomada segura](docs/PROJECT_PROFILE.md).
@@ -13,10 +13,15 @@ O projeto ainda está em estágio pré-alpha. O caminho até uma distribuição
 confiável para terceiros, com gates objetivos de segurança, CI, empacotamento e
 release, está no [roadmap](ROADMAP.md).
 
-Por padrão o runner não faz commit nem push. Quando o projeto habilita
-explicitamente `delivery.mode = "push_branch"`, ele cria um único commit do
-snapshot aprovado e envia somente a branch congelada. Nunca faz merge, push em
-`main`/`master`, force-push, tag, PR, deploy, limpeza destrutiva ou próxima task.
+O runner não faz commit, push, merge, tag, PR ou deploy. Após a aprovação humana,
+ele preserva o worktree e o hash revisado para integração Git manual. O profile
+aceita somente `delivery.mode = "none"`; configurações antigas de
+`push_branch` falham no preflight.
+
+O executor recebe instrução explícita para não fazer commit/push e roda com o
+sandbox da CLI habilitado. Isso ainda não equivale a um isolamento de rede
+provado por namespace/cgroup; repositórios hostis continuam fora do modelo
+suportado até o M2.
 
 ## Preparação
 
@@ -64,10 +69,9 @@ Configure token e IDs numéricos fora do Git conforme
 Execute somente uma instância da ponte por state root; essa exclusividade ainda
 não é imposta pelo processo. A ponte descobre runs de múltiplos projetos. O
 Telegram envia o resumo técnico em partes numeradas; somente a última contém os
-botões **Aprovar e publicar branch** e **Rejeitar**. O texto do primeiro botão é
-fixo nesta versão: em projetos sem entrega automática ele registra apenas
-`HUMAN_APPROVED`, sem criar commit ou branch. Esses projetos podem validar
-decisão e snapshot manualmente:
+botões **Aprovar alterações** e **Rejeitar**. A aprovação registra apenas
+`HUMAN_APPROVED`; não cria job, commit ou branch e não acessa a rede Git.
+Antes de integrar manualmente, valide novamente decisão e snapshot:
 
 ```bash
 ./agent-loop verify --run-dir /caminho/externo/para/o/run
@@ -76,20 +80,9 @@ decisão e snapshot manualmente:
 O comando falha se não houver decisão humana válida ou se o worktree divergir
 do hash revisado.
 
-Com entrega habilitada, a aprovação publica um `delivery-job.json` pendente e
-responde imediatamente ao Telegram. Um worker separado conclui
-`DELIVERING` → `PUSHED`. Sem worker ativo o run permanece aprovado e pendente,
-nunca falsamente `PUSHED`. Uma falha preserva aprovação e worktree em
-`DELIVERY_FAILED`; quando o commit já foi criado e registrado, ele também é
-reutilizado pela retomada:
-
-```bash
-./agent-loop delivery-worker --run-dir /caminho/externo/para/o/run --once
-./agent-loop resume --run-dir /caminho/externo/para/o/run
-```
-
-A retomada assegura o job e processa a entrega em one-shot; Cursor e Codex não
-executam novamente.
+Depois da verificação, inspecione o worktree preservado e execute
+`git add`/`commit`/`push` conscientemente no seu fluxo normal. Esses comandos
+não são executados pelo runner.
 
 ## Extensão explícita de iterações
 
@@ -122,19 +115,14 @@ systemd-analyze verify ~/.config/systemd/user/agent-telegram-bridge.service
 
 O comando apenas gera o arquivo; não habilita nem inicia o serviço.
 
-> **Limitação atual:** a unidade endurecida libera escrita somente no state root,
-> enquanto delivery precisa escrever no Git common dir. Após DX-05 a bridge só
-> enfileira o job; execute `agent-loop delivery-worker` (ou `resume`) fora da
-> unidade da bridge. Não amplie `ReadWritePaths` de forma genérica. O
-> `EnvironmentFile` ainda coloca o token do Telegram no ambiente da ponte —
-> hardening do worker e unidade dedicada sem o token estão na DX-06. Não use
-> `push_branch` com hooks ou `core.hooksPath` não confiáveis até essa separação.
+A unidade endurecida libera escrita somente no state root. A bridge não importa
+módulos de delivery, não executa Git e não precisa escrever no repositório.
 
 ## Estrutura
 
-- `agent-loop`: CLI externa (`run`, `review`, `resume`, `evidence`, `serve`, `verify`, `delivery-worker`, `systemd-unit`);
+- `agent-loop`: CLI externa (`run`, `review`, `resume`, `evidence`, `serve`, `verify`, `systemd-unit`);
 - `scripts/agents/`: executor, revisor e ponte Telegram;
-- `scripts/agents/dx/`: estado, hash, concorrência, fila de delivery e cliente Bot API;
+- `scripts/agents/dx/`: estado, hash, concorrência, aprovação e cliente Bot API;
 - `.agents/reviewer-output.schema.json`: contrato de saída do revisor;
 - `tests/unit/`: suíte focada;
 - `ROADMAP.md`: marcos e gates para uso confiável por terceiros;

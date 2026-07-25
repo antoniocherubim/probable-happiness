@@ -179,14 +179,9 @@ await_human_approval() {
   # Do not rewrite status here: timeout cleanup is lock-coordinated inside the
   # helper so a concurrent claim cannot be downgraded by a non-atomic shell write.
   if [[ "$wait_rc" -eq 0 ]]; then
-    CURRENT_PHASE="delivery"
-    if [[ -f "$RUN_DIR/run.json" ]] && ! DX_CLI delivery-worker --run-dir "$RUN_DIR" --once >/dev/null; then
-      note "human approval was preserved, but automatic branch delivery failed"
-      note "resume only the delivery with: agent-loop resume --run-dir $RUN_DIR"
-      exit 1
-    fi
     note "human approval completed for reviewed diff_hash=${reviewed_diff_hash}"
-    note "delivery policy applied; worktree preserved: $WORKTREE"
+    note "no commit or push was attempted; integrate the preserved worktree manually"
+    note "worktree preserved: $WORKTREE"
     exit 0
   fi
 
@@ -315,19 +310,13 @@ _run_task_entry() {
 
   if [[ -n "$RESUME_RUN_DIR" && "$START_PHASE" == "complete" ]]; then
     if [[ "$(tr -d '\n' < "$RUN_DIR/status")" == "PUSHED" ]]; then
-      note "run already PUSHED; no agent or delivery step will be repeated"
+      note "legacy run already recorded as PUSHED; no network operation will be repeated"
       exit 0
     fi
     DX_CLI verify-reviewed-snapshot --run-dir "$RUN_DIR" >/dev/null || \
       die "approved run no longer matches reviewed snapshot"
-    note "run already HUMAN_APPROVED and snapshot still matches"
-    exit 0
-  fi
-  if [[ -n "$RESUME_RUN_DIR" && "$START_PHASE" == "delivery" ]]; then
-    note "resuming only the approved branch delivery; Cursor and Codex will not run"
-    DX_CLI delivery-worker --run-dir "$RUN_DIR" --once >/dev/null || \
-      die "delivery failed again; approval and worktree were preserved"
-    note "approved branch delivery completed"
+    note "run already approved and snapshot still matches"
+    note "automatic delivery is disabled; integration and push remain manual"
     exit 0
   fi
   if [[ -n "$RESUME_RUN_DIR" && "$START_PHASE" == "awaiting_human" ]]; then
@@ -337,9 +326,8 @@ _run_task_entry() {
     WAIT_EXIT=$?
     set -e
     if [[ "$WAIT_EXIT" -eq 0 ]]; then
-      DX_CLI delivery-worker --run-dir "$RUN_DIR" --once >/dev/null || \
-        die "human approval is preserved, but branch delivery failed"
-      note "human approval and configured delivery completed"
+      note "human approval completed; no commit or push was attempted"
+      note "integrate the preserved worktree manually: $WORKTREE"
       exit 0
     fi
     note "human approval still pending; worktree preserved: $WORKTREE"

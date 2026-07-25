@@ -25,12 +25,7 @@ comando é um array `argv`; nenhum valor passa por `eval` ou shell implícito.
 | `instructions.executor/reviewer` | caminhos relativos | vazio, 256 KiB/arquivo |
 | `documentation.required` | booleano | `false` |
 | `documentation.required_paths` | templates relativos | vazio; `{task_id}`, `{task_slug}` |
-| `delivery.mode` | `none` ou `push_branch` | `none` |
-| `delivery.remote` | nome de remote | `origin` |
-| `delivery.base_branch` | ref de branch | `main` |
-| `delivery.branch_template` | template de ref | `{task_slug}` |
-| `delivery.commit_message_template` | template de texto | `{task_id}: {task_title}` |
-| `delivery.push_after_human_approval` | booleano | `false` |
+| `delivery.mode` | literal `none` | `none`; push automático removido |
 | `policy.missing_profile` | `allow` ou `deny` | `allow` |
 | `policy.terminate_grace_seconds` | inteiro | `5`, 1–300 |
 
@@ -40,9 +35,8 @@ Use `--require-profile` para bloquear a criação de um run sem o arquivo. O val
 flag é a proteção aplicável quando ele está ausente.
 
 Templates são analisados sem `eval`. Documentação aceita somente `{task_id}` e
-`{task_slug}`; branch aceita os mesmos campos; mensagem de commit também aceita
-`{task_title}`. Placeholder desconhecido, caminho absoluto/com `..`, remote
-inválido ou ref rejeitada por `git check-ref-format` bloqueia o preflight.
+`{task_slug}`. Placeholder desconhecido e caminho absoluto/com `..` bloqueiam o
+preflight.
 
 ## Documentação obrigatória
 
@@ -52,24 +46,16 @@ comportamento, testes e riscos; o reviewer valida a precisão. Ausência bloquei
 o gate humano. O loop não edita documentação por heurística e não exige SHA ou
 URL de uma branch que ainda não existe.
 
-## Entrega opt-in
+## Aprovação local
 
-Remote, base, branch, mensagem e hash da URL de push são congelados em
-`run.json`. Após a decisão humana, o loop revalida decisão, `HEAD`, hash e
-manifesto, cria uma index temporária com somente as entradas revisadas, grava
-`tree_oid`/`commit_oid`, cria a ref local e usa refspec explícito sem force:
+`run.json` registra `delivery.mode = "none"`. Após a decisão humana, o loop
+termina em `HUMAN_APPROVED` e preserva o worktree. Não cria index, commit,
+branch, job de delivery nem conexão Git remota.
 
-```text
-<commit_oid>:refs/heads/<branch>
-```
-
-`main`, `master` e a base configurada nunca são alvos. Branch remota diferente
-gera `remote_branch_exists`; a mesma branch no mesmo commit é idempotente.
-Credenciais Git não são copiadas para o run: usa-se apenas a autenticação já
-configurada pelo usuário. Isso não isola automaticamente o ambiente do processo:
-quando a entrega parte da ponte, subprocessos e hooks Git podem herdar variáveis
-da unidade, inclusive o token Telegram carregado por `EnvironmentFile`. Use
-delivery somente com hooks confiáveis até existir um worker sem essa credencial.
+Use `agent-loop verify --run-dir ...` imediatamente antes da integração manual.
+Profiles antigos com `push_branch`, remote ou opções de push são recusados; a
+migração consiste em remover essas chaves ou definir somente
+`[delivery] mode = "none"`.
 
 ## Bootstrap e ambiente
 
@@ -124,13 +110,10 @@ BLOCKED + --review-only -> nova revisão do snapshot atual
 BLOCKED/max_review_iterations + orçamento explícito -> executor em N+1
 AWAITING_HUMAN_APPROVAL -> apenas retoma wait-decision
 HUMAN_APPROVED          -> valida decisão/hash; não repete gate
-HUMAN_APPROVED + delivery -> assegura delivery-job.json → worker → DELIVERING → PUSHED
-DELIVERING/DELIVERY_FAILED -> retoma somente delivery via delivery-worker
-PUSHED                  -> terminal; não repete push
+DELIVERING/DELIVERY_FAILED/PUSHED legados -> valida decisão/hash; sem rede
 ```
 
 ```bash
-./agent-loop delivery-worker --run-dir /state/projects/<repo-id>/runs/<run-id> --once
 ./agent-loop resume --run-dir /state/projects/<repo-id>/runs/<run-id>
 ./agent-loop resume --run-dir /state/projects/<repo-id>/runs/<run-id> --review-only
 ./agent-loop resume --run-dir /state/projects/<repo-id>/runs/<run-id> \
@@ -154,7 +137,7 @@ exige simultaneamente:
   `CHANGES_REQUESTED`;
 - resultado do reviewer concluído, executor report presente e worktree igual ao
   `review-N-snapshot.json`;
-- ausência de artefatos de aprovação/delivery e locks concorrentes.
+- ausência de artefatos de aprovação e locks concorrentes.
 
 `iteration-budget.json` contém `schema_version`, `run_id`, limites original e
 efetivo e uma cadeia de extensões. Cada item registra incremento, limites
@@ -171,26 +154,6 @@ os hashes não autenticam um adversário com o mesmo usuário capaz de reescreve
 artefatos e recalculá-los. O botão Telegram de extensão não faz parte do DX-04:
 fica como follow-up para evitar uma segunda superfície de autorização nesta
 entrega.
-
-Exemplo abreviado de `delivery.json`:
-
-```json
-{
-  "schema_version": 1,
-  "task_id": "CP-00",
-  "status": "PUSHED",
-  "branch": "cp-00",
-  "remote": "origin",
-  "base_commit": "0123456789abcdef",
-  "reviewed_diff_hash": "752aef57...",
-  "commit_oid": "abc123...",
-  "tree_oid": "def456...",
-  "remote_oid": "abc123...",
-  "push_result": "pushed",
-  "branch_url": "https://github.com/org/repo/tree/cp-00",
-  "compare_url": "https://github.com/org/repo/compare/main...cp-00"
-}
-```
 
 ## Evidência complementar
 
@@ -209,17 +172,17 @@ Anexar não altera status. Somente uma nova revisão pode abrir o gate humano.
 - O motor não provisiona bancos/containers; o bootstrap somente prepara ou
   verifica recursos autorizados pelo projeto.
 - Outro processo do mesmo usuário ainda pode alterar o worktree fora do lock;
-  hashes antes/depois da revisão, antes do push e `verify` detectam esse drift.
+  hashes antes/depois da revisão e `verify` detectam esse drift.
 - Locks e hashes detectam corrupção e alterações acidentais, mas não autenticam
   o state root contra adulteração deliberada por outro processo com o mesmo UID.
-- A unidade systemd atual escreve somente no state root e, isoladamente, não
-  consegue concluir `push_branch`; use o runner ativo ou `resume` fora da unidade.
+- A unidade systemd atual escreve somente no state root e nunca executa Git para
+  commit ou push.
 - Saída de subprocessos e snapshots grandes não possuem cota de disco/memória;
   os arquivos brutos anteriores à sanitização podem sobreviver a uma morte
   abrupta do supervisor.
 - Runs congelam o perfil serializado. Uma versão futura que altere defaults ou
   schema precisa de migração explícita para não tornar runs antigos incompatíveis.
-- Autenticação e políticas server-side do remote continuam externas; falhas
-  ficam em `DELIVERY_FAILED` e exigem correção operacional antes do `resume`.
+- Autenticação e políticas server-side do remote ficam integralmente no fluxo
+  Git manual do operador.
 - `SIGKILL` aplicado ao próprio supervisor pode impedir sua gravação final; o
   próximo `resume` trata o artefato parcial como interrupção, nunca sucesso.

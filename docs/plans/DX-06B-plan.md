@@ -1,5 +1,9 @@
 # Plano de execução — DX-06B
 
+> Encerrado no review 8 sem aprovação. A decisão posterior foi remover o push
+> automático e executar a DX-06C. Este plano é histórico e não deve ser
+> retomado.
+
 ## Decisão
 
 Não continuar a execução DX-06 após o `review-12.json`. O run e seu worktree

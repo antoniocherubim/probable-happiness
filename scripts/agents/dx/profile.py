@@ -23,19 +23,10 @@ _SAFE_SECTIONS = {
     "validation": {"commands"},
     "instructions": {"executor", "reviewer"},
     "documentation": {"required", "required_paths"},
-    "delivery": {
-        "mode",
-        "remote",
-        "base_branch",
-        "branch_template",
-        "commit_message_template",
-        "push_after_human_approval",
-    },
+    "delivery": {"mode"},
     "policy": {"missing_profile", "terminate_grace_seconds"},
 }
 _DOCUMENTATION_FIELDS = {"task_id", "task_slug"}
-_BRANCH_FIELDS = {"task_id", "task_slug"}
-_COMMIT_FIELDS = {"task_id", "task_slug", "task_title"}
 _BASE_ENV = {
     "HOME",
     "LANG",
@@ -78,11 +69,6 @@ class ProjectProfile:
     documentation_required: bool = False
     documentation_paths: tuple[str, ...] = ()
     delivery_mode: str = "none"
-    delivery_remote: str = "origin"
-    delivery_base_branch: str = "main"
-    delivery_branch_template: str = "{task_slug}"
-    delivery_commit_message_template: str = "{task_id}: {task_title}"
-    delivery_push_after_human_approval: bool = False
     missing_profile: str = "allow"
     terminate_grace_seconds: int = 5
 
@@ -113,14 +99,7 @@ class ProjectProfile:
                 "required": self.documentation_required,
                 "required_paths": list(self.documentation_paths),
             },
-            "delivery": {
-                "mode": self.delivery_mode,
-                "remote": self.delivery_remote,
-                "base_branch": self.delivery_base_branch,
-                "branch_template": self.delivery_branch_template,
-                "commit_message_template": self.delivery_commit_message_template,
-                "push_after_human_approval": self.delivery_push_after_human_approval,
-            },
+            "delivery": {"mode": self.delivery_mode},
             "policy": {
                 "missing_profile": self.missing_profile,
                 "terminate_grace_seconds": self.terminate_grace_seconds,
@@ -257,19 +236,10 @@ def load_project_profile(repo: Path | str, *, missing_policy: str = "allow") -> 
     if documentation_required and not documentation_paths:
         raise ProfileError("documentation.required needs at least one required_paths entry")
     delivery_mode = delivery.get("mode", "none")
-    if delivery_mode not in {"none", "push_branch"}:
-        raise ProfileError("delivery.mode must be 'none' or 'push_branch'")
-    delivery_remote = delivery.get("remote", "origin")
-    delivery_base_branch = delivery.get("base_branch", "main")
-    if not isinstance(delivery_remote, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", delivery_remote):
-        raise ProfileError("delivery.remote must be a safe Git remote name")
-    if not isinstance(delivery_base_branch, str) or not delivery_base_branch:
-        raise ProfileError("delivery.base_branch must be a non-empty string")
-    push_after = delivery.get("push_after_human_approval", False)
-    if type(push_after) is not bool:
-        raise ProfileError("delivery.push_after_human_approval must be a boolean")
-    if delivery_mode == "push_branch" and not push_after:
-        raise ProfileError("push_branch delivery requires push_after_human_approval = true")
+    if delivery_mode != "none":
+        raise ProfileError(
+            "delivery.mode must be 'none'; automatic Git push was removed"
+        )
 
     return ProjectProfile(
         path=path,
@@ -298,21 +268,6 @@ def load_project_profile(repo: Path | str, *, missing_policy: str = "allow") -> 
         documentation_required=documentation_required,
         documentation_paths=documentation_paths,
         delivery_mode=delivery_mode,
-        delivery_remote=delivery_remote,
-        delivery_base_branch=delivery_base_branch,
-        delivery_branch_template=_template(
-            delivery.get("branch_template"),
-            "delivery.branch_template",
-            "{task_slug}",
-            _BRANCH_FIELDS,
-        ),
-        delivery_commit_message_template=_template(
-            delivery.get("commit_message_template"),
-            "delivery.commit_message_template",
-            "{task_id}: {task_title}",
-            _COMMIT_FIELDS,
-        ),
-        delivery_push_after_human_approval=push_after,
         missing_profile=configured_missing,
         terminate_grace_seconds=_bounded_int(
             policy.get("terminate_grace_seconds"),

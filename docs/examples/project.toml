@@ -33,14 +33,9 @@ required_paths = [
   "docs/tasks/{task_id}.md",
 ]
 
-# Opt-in. Omita esta tabela para terminar em HUMAN_APPROVED sem commit/push.
+# Opcional. O único modo suportado termina em HUMAN_APPROVED sem commit/push.
 [delivery]
-mode = "push_branch"
-remote = "origin"
-base_branch = "main"
-branch_template = "{task_slug}"
-commit_message_template = "{task_id}: {task_title}"
-push_after_human_approval = true
+mode = "none"
 
 [policy]
 missing_profile = "deny"

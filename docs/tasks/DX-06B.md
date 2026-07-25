@@ -1,6 +1,10 @@
 # DX-06B — Contexto Git confiável e delivery por allowlist positiva
 
-Status: planejada.
+Status: experimento encerrado; candidata do review 8 preservada e não aprovada.
+
+Substituída por: [DX-06C](DX-06C.md), que remove push automático do produto
+estável. Este documento permanece como registro do experimento de staging Git e
+não descreve uma feature disponível.
 
 Marco: M0, parte 3 de 3.
 Depende de: [DX-06](DX-06.md).

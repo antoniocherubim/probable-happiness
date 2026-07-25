@@ -11,13 +11,11 @@ task versionada
   → APPROVED técnico
   → AWAITING_HUMAN_APPROVAL
   → HUMAN_APPROVED para o hash revisado
-  → sem delivery: verificação manual antes de integrar
-  → com delivery: DELIVERING → PUSHED em branch da task
+  → verificação manual antes de integrar
 ```
 
-Não há automação de decisão de produto, criação de task, merge, push na base,
-force-push, tag, PR, deploy, limpeza ou próxima task. Commit e push de branch
-ocorrem somente no modo opt-in descrito no perfil.
+Não há automação de decisão de produto, criação de task, commit, merge, push,
+tag, PR, deploy, limpeza ou próxima task. A integração Git é sempre manual.
 
 ## Pré-requisitos
 
@@ -143,7 +141,7 @@ Documentação:
 - docs/env-variables.md
 - ROADMAP.md
 
-[Aprovar e publicar branch] [Rejeitar]
+[Aprovar alterações] [Rejeitar]
 ```
 
 ## systemd --user
@@ -162,21 +160,11 @@ systemctl --user daemon-reload
 O template aplica `NoNewPrivileges`, `ProtectSystem=strict`, home read-only e
 liberação de escrita somente para o state root.
 
-### Limitação da entrega na unidade atual
+### Limite intencional da unidade
 
-Após DX-05 a ponte apenas registra a decisão e enfileira `delivery-job.json`;
-ela não executa Git. Conclua a entrega com:
-
-```bash
-./agent-loop delivery-worker --run-dir /state/projects/<repo-id>/runs/<run> --once
-# ou
-./agent-loop resume --run-dir /state/projects/<repo-id>/runs/<run>
-```
-
-A unidade da bridge continua sem escrita no repositório. O `EnvironmentFile`
-ainda coloca o token do bot no ambiente da ponte; a DX-06 introduz a unidade do
-worker sem esse token, com ambiente Git mínimo e hooks desabilitados. Até lá,
-habilite `push_branch` somente em repositórios e hooks confiáveis.
+A ponte registra somente a decisão. Ela não importa módulos de delivery, não
+executa Git e não escreve no repositório. O `EnvironmentFile` coloca o token do
+bot somente nesse processo; não existe worker de push no produto estável.
 
 ## Estados e falhas
 
@@ -185,12 +173,10 @@ habilite `push_branch` somente em repositórios e hooks confiáveis.
 - `CHANGES_REQUESTED`: feedback retornará ao Cursor;
 - `APPROVED`: aceite técnico, nunca humano;
 - `AWAITING_HUMAN_APPROVAL`: botão pendente;
-- `HUMAN_APPROVED`: decisão autenticada para o hash revisado; com
-  `push_branch`, publica `delivery-job.json` pendente;
-- `DELIVERING`: worker validou job/manifesto e entrega em andamento;
-- `DELIVERY_FAILED`: aprovação preservada; `delivery-worker`/`resume` repetem
-  somente a entrega;
-- `PUSHED`: commit e OID remoto confirmados; terminal com delivery;
+- `HUMAN_APPROVED`: decisão autenticada para o hash revisado; terminal no fluxo
+  atual, aguardando integração manual;
+- `DELIVERING`, `DELIVERY_FAILED`, `PUSHED`: estados legados reconhecidos apenas
+  para inspeção/retomada sem rede;
 - `BLOCKED`: falha, interrupção, dependência externa ou limite atingido.
 
 Quando a causa for exclusivamente `max_review_iterations`, a notificação
@@ -213,13 +199,7 @@ mensagem para não consumir uma notificação substituída durante envio.
 APPROVED → AWAITING_HUMAN_APPROVAL
                     ├─ Rejeitar → BLOCKED
                     └─ Aprovar  → HUMAN_APPROVED
-                                      ├─ delivery=none → terminal
-                                      └─ push_branch → delivery-job.json (pending)
-                                                          └─ delivery-worker
-                                                               → DELIVERING
-                                                                   ├─ sucesso → PUSHED
-                                                                   └─ falha → DELIVERY_FAILED
-                                                                                └─ resume/worker → DELIVERING
+                                      └─ verify → integração Git manual
 
 CHANGES_REQUESTED em N = limite
   → BLOCKED/max_review_iterations
@@ -229,20 +209,18 @@ CHANGES_REQUESTED em N = limite
   → validações → reviewer → gate humano normal ou novo limite
 ```
 
-O commit nasce de uma index temporária baseada no commit-base e no manifesto
-exato, nunca de `git add -A`. FIFO/socket/device são recusados; artefatos
-operacionais precisam estar ignorados. O push usa refspec explícito e confirma
-o OID remoto. Para remotes GitHub reconhecidos, a mensagem final inclui links
-sanitizados de branch e comparação; em outros providers mostra apenas remote e
-branch. Falha dessa notificação não desfaz um push confirmado.
+FIFO/socket/device são recusados no snapshot; artefatos operacionais precisam
+estar ignorados. Depois de `agent-loop verify`, cabe ao operador inspecionar o
+worktree e executar conscientemente os comandos Git de integração/publicação.
 
 ## Perfil, ambiente e retomada
 
 O contrato DX-02 está em [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md), com seu
 registro histórico em [`tasks/DX-02.md`](tasks/DX-02.md), incluindo schema TOML,
 bootstrap, ambiente externo `0600`, timeout por grupo de processos, heartbeat,
-`agent-loop resume` e `agent-loop evidence`. O delivery opt-in está registrado
-em [`tasks/DX-03.md`](tasks/DX-03.md).
+`agent-loop resume` e `agent-loop evidence`. O histórico do delivery removido
+está registrado em [`tasks/DX-03.md`](tasks/DX-03.md),
+[`tasks/DX-05.md`](tasks/DX-05.md) e [`tasks/DX-06B.md`](tasks/DX-06B.md).
 
 ## Limpeza
 
