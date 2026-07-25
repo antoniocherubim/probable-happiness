@@ -143,20 +143,9 @@ def cmd_compute_diff_hash(args: argparse.Namespace) -> int:
 
 
 def cmd_create_request(args: argparse.Namespace) -> int:
-    try:
-        request = create_approval_request(
-            run_dir=Path(args.run_dir),
-            task=args.task,
-            base_commit=args.base_commit,
-            worktree=Path(args.worktree),
-            review_report=args.review_report,
-            diff_hash=args.diff_hash,
-            task_id=args.task_id,
-        )
-    except ApprovalError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 1
-    summary = build_awaiting_summary(request["task_id"], args.review_report)
+    summary = build_awaiting_summary(
+        args.task_id or Path(args.task).stem, args.review_report
+    )
     messages = None
     summary_path = Path(args.run_dir) / SUMMARY_FILENAME
     if summary_path.is_file():
@@ -170,13 +159,33 @@ def cmd_create_request(args: argparse.Namespace) -> int:
                 summary = configured[0]
         except (OSError, UnicodeError, json.JSONDecodeError):
             messages = None
-    enqueue_notification(
-        run_dir=Path(args.run_dir),
-        kind="awaiting_human_approval",
-        summary=summary,
-        report_hint=Path(args.review_report).name,
-        messages=messages,
-    )
+    try:
+        request = create_approval_request(
+            run_dir=Path(args.run_dir),
+            task=args.task,
+            base_commit=args.base_commit,
+            worktree=Path(args.worktree),
+            review_report=args.review_report,
+            diff_hash=args.diff_hash,
+            task_id=args.task_id,
+            notify_summary=summary,
+            notify_messages=messages,
+            report_hint=Path(args.review_report).name,
+        )
+    except ApprovalError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    # Outbox is published inside the create transaction when notify_summary is
+    # set. Keep enqueue as a no-op refresh only when status is still awaiting
+    # and the outbox is missing (legacy / direct-API callers).
+    if not (Path(args.run_dir) / "telegram_notify.json").is_file():
+        enqueue_notification(
+            run_dir=Path(args.run_dir),
+            kind="awaiting_human_approval",
+            summary=summary,
+            report_hint=Path(args.review_report).name,
+            messages=messages,
+        )
     print(request["run_id"])
     return 0
 
@@ -475,6 +484,65 @@ def cmd_resume_exec(args: argparse.Namespace) -> int:
     return 1  # pragma: no cover
 
 
+def cmd_persist_text(args: argparse.Namespace) -> int:
+    """Write a private text artifact under the run dir via the secure API."""
+    from .persist import PersistError, secure_write_text
+
+    run_dir = Path(args.run_dir)
+    name = Path(args.name).name
+    if name != args.name or "/" in args.name or name.startswith("."):
+        print("ERROR: artifact name must be a non-hidden basename", file=sys.stderr)
+        return 1
+    try:
+        secure_write_text(
+            run_dir / name,
+            args.value if args.value.endswith("\n") else f"{args.value}\n",
+            containment_root=run_dir,
+            ensure_trailing_newline=False,
+        )
+    except (OSError, PersistError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_publish_file(args: argparse.Namespace) -> int:
+    """Publish a staged file into the run dir with durable replace semantics."""
+    from .persist import PersistError, secure_read_bytes, secure_unlink, secure_write_bytes
+
+    run_dir = Path(args.run_dir)
+    name = Path(args.name).name
+    if name != args.name or "/" in args.name or name.startswith("."):
+        print("ERROR: artifact name must be a non-hidden basename", file=sys.stderr)
+        return 1
+    source = Path(args.source)
+    try:
+        payload = secure_read_bytes(
+            source,
+            max_bytes=int(args.max_bytes),
+            require_private=bool(args.require_private),
+            containment_root=run_dir if source.parent.resolve() == run_dir.resolve() else None,
+        )
+        secure_write_bytes(
+            run_dir / name,
+            payload,
+            containment_root=run_dir,
+        )
+        if args.unlink_source:
+            try:
+                secure_unlink(
+                    source,
+                    containment_root=run_dir if source.parent.resolve() == run_dir.resolve() else None,
+                )
+            except PersistError:
+                # Fall back to unlink after successful publish when source is a temp.
+                source.unlink(missing_ok=True)
+    except (OSError, PersistError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_record_review_snapshot(args: argparse.Namespace) -> int:
     try:
         atomic_write_json(
@@ -581,35 +649,94 @@ def cmd_transition_state(args: argparse.Namespace) -> int:
 
 def cmd_record_failure(args: argparse.Namespace) -> int:
     from .approval import utc_now_iso
+    from .persist import PersistError, secure_lstat_regular, secure_read_text
+    from .txn import TransactionError, commit_status_and_artifacts
 
     run_dir = Path(args.run_dir)
-    failure_path = run_dir / "failure.json"
     try:
-        with run_scoped_lock(run_dir, lock_name=STATE_LOCK_FILENAME):
-            result = transition_run(
-                run_dir,
-                RunEvent.RUN_BLOCKED,
-                state_lock_held=True,
-            )
-            # A replay must not replace the first structured blocker. If a
-            # prior process crashed after publishing BLOCKED, complete the
-            # missing artifact while still holding the canonical state lock.
-            if result.result == "applied" or not failure_path.exists():
-                atomic_write_json(
-                    failure_path,
-                    {
-                        "schema_version": 1,
-                        "reason": args.reason,
-                        "phase": args.phase,
-                        "iteration": args.iteration,
-                        "report": args.report or None,
-                        "recorded_at": utc_now_iso(),
-                    },
-                )
-    except (OSError, StateTransitionError, ValueError) as exc:
+        commit_status_and_artifacts(
+            run_dir,
+            event=RunEvent.RUN_BLOCKED.value,
+            status_event=RunEvent.RUN_BLOCKED,
+            artifacts={
+                "failure.json": {
+                    "schema_version": 1,
+                    "reason": args.reason,
+                    "phase": args.phase,
+                    "iteration": args.iteration,
+                    "report": args.report or None,
+                    "recorded_at": utc_now_iso(),
+                }
+            },
+            origin="runner",
+            lock_name=STATE_LOCK_FILENAME,
+        )
+    except (OSError, StateTransitionError, TransactionError, ValueError, PersistError) as exc:
+        # Replay: if already BLOCKED with a regular failure.json, succeed idempotently.
+        # Symlinks at failure.json or status must not be treated as success.
+        try:
+            secure_lstat_regular(run_dir / "failure.json", require_private=True)
+            status = secure_read_text(
+                run_dir / "status",
+                max_bytes=128,
+                require_private=True,
+                containment_root=run_dir,
+            ).strip()
+            if status == "BLOCKED":
+                return 0
+        except (OSError, PersistError, ValueError):
+            pass
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     return 0
+
+
+def cmd_inspect(args: argparse.Namespace) -> int:
+    from .migrate import MigrationError, inspect_run
+
+    try:
+        result = inspect_run(Path(args.run_dir))
+    except (MigrationError, OSError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("ok", False) else 2
+
+
+def cmd_migrate(args: argparse.Namespace) -> int:
+    from .migrate import MigrationError, migrate_run
+
+    try:
+        result = migrate_run(
+            Path(args.run_dir),
+            dry_run=args.dry_run,
+            rollback=args.rollback,
+        )
+    except (MigrationError, OSError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_verify_state(args: argparse.Namespace) -> int:
+    from .migrate import MigrationError, verify_run_state
+    from .txn import TransactionError, recover_run_transactions
+
+    run_dir = Path(args.run_dir)
+    try:
+        if args.recover:
+            recovery = recover_run_transactions(run_dir)
+        else:
+            recovery = None
+        result = verify_run_state(run_dir)
+        if recovery is not None:
+            result["recovery"] = recovery
+    except (MigrationError, TransactionError, OSError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("ok", False) else 2
 
 
 def cmd_evidence(args: argparse.Namespace) -> int:
@@ -771,6 +898,35 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_record_review_snapshot)
 
     p = sub.add_parser(
+        "persist-text",
+        help="Write a private text artifact in a run via the secure persistence API",
+    )
+    p.add_argument("--run-dir", required=True)
+    p.add_argument("--name", required=True, help="Basename under the run directory")
+    p.add_argument("--value", required=True)
+    p.set_defaults(func=cmd_persist_text)
+
+    p = sub.add_parser(
+        "publish-file",
+        help="Durably publish a staged file into a run directory",
+    )
+    p.add_argument("--run-dir", required=True)
+    p.add_argument("--name", required=True, help="Destination basename under the run directory")
+    p.add_argument("--source", required=True, help="Staged source path")
+    p.add_argument("--max-bytes", type=int, default=1024 * 1024)
+    p.add_argument(
+        "--require-private",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    p.add_argument(
+        "--unlink-source",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    p.set_defaults(func=cmd_publish_file)
+
+    p = sub.add_parser(
         "validate-documentation",
         help="Require configured documentation paths in the current snapshot",
     )
@@ -819,6 +975,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--report", default=None)
     p.set_defaults(func=cmd_record_failure)
 
+    p = sub.add_parser("inspect", help="Inspect run schemas, hashes, and artifacts (read-only)")
+    p.add_argument("--run-dir", required=True)
+    p.set_defaults(func=cmd_inspect)
+
+    p = sub.add_parser("migrate", help="Migrate run persistence schemas with backup")
+    p.add_argument("--run-dir", required=True)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--rollback", action="store_true")
+    p.set_defaults(func=cmd_migrate)
+
+    p = sub.add_parser("verify-state", help="Verify run state integrity (read-only)")
+    p.add_argument("--run-dir", required=True)
+    p.add_argument(
+        "--recover",
+        action="store_true",
+        help="Complete or abort an interrupted transaction journal first",
+    )
+    p.set_defaults(func=cmd_verify_state)
+
     p = sub.add_parser("evidence", help="Attach bounded untrusted evidence to a run")
     p.add_argument("--run-dir", required=True)
     p.add_argument("--file", required=True)
@@ -829,6 +1004,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .persist import ensure_secure_umask
+
+    ensure_secure_umask()
     parser = build_parser()
     args = parser.parse_args(argv)
     return int(args.func(args))

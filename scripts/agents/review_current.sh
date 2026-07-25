@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+umask 077
+
 die() {
   printf 'ERROR: %s\n' "$*" >&2
   exit 1

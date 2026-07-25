@@ -19,7 +19,18 @@ from .approval import (
     validate_decision_matches_request,
 )
 from .atomic import atomic_write_json, read_json, run_scoped_lock
+from .persist import PersistError, ensure_private_dir, secure_read_json, secure_write_json
 from .profile import ProfileError, load_project_profile
+from .schemas import (
+    FUTURE_SCHEMA_REFUSAL,
+    ITERATION_BUDGET_SCHEMA_VERSION,
+    PERSISTENCE_SCHEMA_VERSION,
+    RUN_METADATA_SCHEMA_VERSION,
+    RUNNER_VERSION,
+    SUPPORTED_ITERATION_BUDGET_SCHEMAS,
+    SUPPORTED_PRIOR_PERSISTENCE_SCHEMAS,
+    SUPPORTED_RUN_METADATA_SCHEMAS,
+)
 from .state_machine import RunEvent, transition_run
 
 
@@ -27,11 +38,11 @@ RUN_METADATA = "run.json"
 EVIDENCE_MANIFEST = "evidence.json"
 MAX_EVIDENCE_BYTES = 1024 * 1024
 ITERATION_BUDGET = "iteration-budget.json"
-ITERATION_BUDGET_SCHEMA_VERSION = 1
 MAX_ADDITIONAL_ITERATIONS = 20
 MAX_EFFECTIVE_ITERATIONS = 50
 MAX_REVIEW_REASON = "max_review_iterations"
 LEGACY_MAX_REVIEW_REASON = "max_iterations"
+GENESIS_ENTRY_HASH = "0" * 64
 
 
 class RunStateError(ValueError):
@@ -47,18 +58,64 @@ def write_run_metadata(run_dir: Path, payload: dict[str, Any]) -> dict[str, Any]
     missing = required - set(payload)
     if missing:
         raise RunStateError(f"run metadata missing: {', '.join(sorted(missing))}")
-    document = {"schema_version": 1, "run_id": Path(run_dir).name, **payload}
-    atomic_write_json(Path(run_dir) / RUN_METADATA, document)
+    run_path = Path(run_dir)
+    if run_path.exists():
+        info = run_path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise RunStateError("run directory must be a regular directory")
+    else:
+        ensure_private_dir(run_path)
+    document = {
+        "schema_version": RUN_METADATA_SCHEMA_VERSION,
+        "persistence_schema": PERSISTENCE_SCHEMA_VERSION,
+        "runner_version": RUNNER_VERSION,
+        "run_id": run_path.name,
+        **payload,
+    }
+    atomic_write_json(run_path / RUN_METADATA, document)
     return document
+
+
+def _version_tuple(value: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for piece in str(value).split("."):
+        if piece.isdigit():
+            parts.append(int(piece))
+        else:
+            break
+    return tuple(parts)
 
 
 def load_run_metadata(run_dir: Path) -> dict[str, Any]:
     path = Path(run_dir) / RUN_METADATA
     try:
-        data = read_json(path)
-    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        data = secure_read_json(path, require_private=True, containment_root=run_dir)
+    except (OSError, UnicodeError, PersistError, ValueError, json.JSONDecodeError) as exc:
         raise RunStateError(f"invalid run metadata: {exc}") from exc
-    if data.get("schema_version") != 1 or data.get("run_id") != Path(run_dir).name:
+    schema = data.get("schema_version")
+    if type(schema) is int and schema > RUN_METADATA_SCHEMA_VERSION:
+        raise RunStateError(FUTURE_SCHEMA_REFUSAL)
+    if schema not in SUPPORTED_RUN_METADATA_SCHEMAS:
+        raise RunStateError("run metadata schema unsupported; run migrate")
+    # Schema 1 legacy may omit persistence_schema; schema 2+ must declare it.
+    if schema >= 2:
+        persistence = data.get("persistence_schema")
+        if type(persistence) is not int:
+            raise RunStateError("run persistence_schema missing or malformed")
+        if persistence > PERSISTENCE_SCHEMA_VERSION:
+            raise RunStateError(FUTURE_SCHEMA_REFUSAL)
+        if persistence not in SUPPORTED_PRIOR_PERSISTENCE_SCHEMAS:
+            raise RunStateError("run persistence schema unsupported; run migrate")
+        runner = data.get("runner_version")
+        if not isinstance(runner, str) or not runner:
+            raise RunStateError("run metadata runner_version missing or malformed")
+        if _version_tuple(runner) > _version_tuple(RUNNER_VERSION):
+            raise RunStateError(FUTURE_SCHEMA_REFUSAL)
+    else:
+        persistence = data.get("persistence_schema", 1)
+        if type(persistence) is int and persistence > PERSISTENCE_SCHEMA_VERSION:
+            raise RunStateError(FUTURE_SCHEMA_REFUSAL)
+    if data.get("run_id") != Path(run_dir).name:
         raise RunStateError("run metadata binding mismatch")
     return data
 
@@ -137,41 +194,27 @@ def _review_hash(run_dir: Path, iteration: int) -> str | None:
 
 def _regular_json(path: Path, label: str) -> dict[str, Any]:
     try:
-        info = path.lstat()
-    except OSError as exc:
-        raise IterationBudgetError(f"{label} is missing") from exc
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise IterationBudgetError(f"{label} must be a regular non-symlink file")
-    try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        try:
-            opened = os.fstat(fd)
-            if not stat.S_ISREG(opened.st_mode) or (
-                opened.st_dev,
-                opened.st_ino,
-            ) != (info.st_dev, info.st_ino):
-                raise IterationBudgetError(f"{label} changed while opening")
-            with os.fdopen(fd, "r", encoding="utf-8") as handle:
-                fd = -1
-                value = json.load(handle)
-        finally:
-            if fd >= 0:
-                os.close(fd)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return secure_read_json(
+            path, require_private=True, containment_root=path.parent
+        )
+    except PersistError as exc:
         raise IterationBudgetError(f"{label} is invalid: {exc}") from exc
-    if not isinstance(value, dict):
-        raise IterationBudgetError(f"{label} must contain a JSON object")
-    return value
 
 
 def _iteration_cursor(run_dir: Path) -> int:
     path = run_dir / "iteration"
     try:
-        info = path.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-            raise IterationBudgetError("iteration cursor must be a regular non-symlink file")
-        value = int(path.read_text(encoding="utf-8").strip())
-    except (OSError, UnicodeError, ValueError) as exc:
+        from .persist import secure_read_text
+
+        value = int(
+            secure_read_text(
+                path,
+                max_bytes=64,
+                require_private=True,
+                containment_root=run_dir,
+            ).strip()
+        )
+    except (PersistError, OSError, UnicodeError, ValueError) as exc:
         raise IterationBudgetError("iteration cursor is missing or invalid") from exc
     if value < 1:
         raise IterationBudgetError("iteration cursor must be positive")
@@ -192,6 +235,7 @@ def _strict_review_snapshot_hash(run_dir: Path, iteration: int) -> str:
 
 
 def _extension_id(run_id: str, entry: dict[str, Any]) -> str:
+    """Legacy DX-04 binding (schema v1)."""
     binding = {
         "run_id": run_id,
         "additional_iterations": entry["additional_iterations"],
@@ -206,6 +250,43 @@ def _extension_id(run_id: str, entry: dict[str, Any]) -> str:
     }
     encoded = json.dumps(binding, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _extension_id_v2(run_id: str, entry: dict[str, Any]) -> str:
+    """DX-08 binding includes timestamps, updated_at, and previous entry hash."""
+    binding = {
+        "run_id": run_id,
+        "additional_iterations": entry["additional_iterations"],
+        "previous_limit": entry["previous_limit"],
+        "effective_limit": entry["effective_limit"],
+        "origin": entry["origin"],
+        "authorized_at": entry["authorized_at"],
+        "updated_at": entry["updated_at"],
+        "authorized_at_iteration": entry["authorized_at_iteration"],
+        "review_file": entry["review_file"],
+        "review_sha256": entry["review_sha256"],
+        "reviewed_diff_hash": entry["reviewed_diff_hash"],
+        "blocked_reason": entry["blocked_reason"],
+        "previous_entry_hash": entry["previous_entry_hash"],
+    }
+    encoded = json.dumps(binding, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _entry_chain_hash(entry: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "idempotency_id": entry["idempotency_id"],
+                "previous_entry_hash": entry["previous_entry_hash"],
+                "authorized_at": entry["authorized_at"],
+                "updated_at": entry["updated_at"],
+                "effective_limit": entry["effective_limit"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def load_iteration_budget(run_dir: Path, original_limit: int) -> dict[str, Any]:
@@ -233,9 +314,13 @@ def load_iteration_budget(run_dir: Path, original_limit: int) -> dict[str, Any]:
     }
     if set(document) != required:
         raise IterationBudgetError("iteration budget has missing or unknown fields")
+    schema = document.get("schema_version")
+    if type(schema) is int and schema > ITERATION_BUDGET_SCHEMA_VERSION:
+        raise IterationBudgetError(FUTURE_SCHEMA_REFUSAL)
+    if schema not in SUPPORTED_ITERATION_BUDGET_SCHEMAS:
+        raise IterationBudgetError("iteration budget schema unsupported; run migrate")
     if (
-        document.get("schema_version") != ITERATION_BUDGET_SCHEMA_VERSION
-        or document.get("run_id") != Path(run_dir).name
+        document.get("run_id") != Path(run_dir).name
         or document.get("original_limit") != original_limit
     ):
         raise IterationBudgetError("iteration budget binding mismatch")
@@ -250,7 +335,7 @@ def load_iteration_budget(run_dir: Path, original_limit: int) -> dict[str, Any]:
         )
     current = original_limit
     identifiers: set[str] = set()
-    extension_fields = {
+    extension_fields_v1 = {
         "idempotency_id",
         "additional_iterations",
         "previous_limit",
@@ -263,9 +348,17 @@ def load_iteration_budget(run_dir: Path, original_limit: int) -> dict[str, Any]:
         "reviewed_diff_hash",
         "blocked_reason",
     }
+    extension_fields_v2 = extension_fields_v1 | {"previous_entry_hash", "updated_at"}
+    previous_hash = GENESIS_ENTRY_HASH
     for entry in extensions:
-        if not isinstance(entry, dict) or set(entry) != extension_fields:
+        if not isinstance(entry, dict):
             raise IterationBudgetError("iteration budget extension is malformed")
+        if schema == 1:
+            if set(entry) != extension_fields_v1:
+                raise IterationBudgetError("iteration budget extension is malformed")
+        else:
+            if set(entry) != extension_fields_v2:
+                raise IterationBudgetError("iteration budget extension is malformed")
         additional = entry.get("additional_iterations")
         effective = entry.get("effective_limit")
         if (
@@ -285,9 +378,19 @@ def load_iteration_budget(run_dir: Path, original_limit: int) -> dict[str, Any]:
             not in {MAX_REVIEW_REASON, LEGACY_MAX_REVIEW_REASON}
         ):
             raise IterationBudgetError("iteration budget extension chain is invalid")
-        identifier = str(entry.get("idempotency_id", ""))
-        if identifier != _extension_id(Path(run_dir).name, entry) or identifier in identifiers:
-            raise IterationBudgetError("iteration budget idempotency binding is invalid")
+        if schema >= 2:
+            if not isinstance(entry.get("updated_at"), str) or not entry["updated_at"]:
+                raise IterationBudgetError("iteration budget extension updated_at missing")
+            if entry.get("previous_entry_hash") != previous_hash:
+                raise IterationBudgetError("iteration budget previous hash chain broken")
+            identifier = str(entry.get("idempotency_id", ""))
+            if identifier != _extension_id_v2(Path(run_dir).name, entry) or identifier in identifiers:
+                raise IterationBudgetError("iteration budget idempotency binding is invalid")
+            previous_hash = _entry_chain_hash(entry)
+        else:
+            identifier = str(entry.get("idempotency_id", ""))
+            if identifier != _extension_id(Path(run_dir).name, entry) or identifier in identifiers:
+                raise IterationBudgetError("iteration budget idempotency binding is invalid")
         expected_review_file = f"review-{entry['authorized_at_iteration']}.json"
         if entry.get("review_file") != expected_review_file:
             raise IterationBudgetError("iteration budget review binding is invalid")
@@ -301,6 +404,12 @@ def load_iteration_budget(run_dir: Path, original_limit: int) -> dict[str, Any]:
         current = effective
     if document.get("effective_limit") != current:
         raise IterationBudgetError("iteration budget effective limit mismatch")
+    if schema >= 2:
+        last = extensions[-1]
+        if document.get("updated_at") != last.get("updated_at"):
+            raise IterationBudgetError(
+                "iteration budget updated_at is not integrity-bound to the tip entry"
+            )
     return document
 
 
@@ -412,8 +521,18 @@ def _authorize_iteration_extension_locked(
             reason, _failure = _failure_reason(run_dir)
             if reason in {MAX_REVIEW_REASON, LEGACY_MAX_REVIEW_REASON}:
                 try:
-                    transition_run(run_dir, RunEvent.ITERATION_BUDGET_EXTENDED)
-                except (OSError, ValueError):
+                    from .txn import LogicalTransaction, _commit_locked
+
+                    txn = LogicalTransaction(
+                        run_dir=run_dir,
+                        event=RunEvent.ITERATION_BUDGET_EXTENDED.value,
+                        status_event=RunEvent.ITERATION_BUDGET_EXTENDED,
+                        origin="resume",
+                        _lock_name=".resume.lock",
+                    )
+                    txn.add_json(ITERATION_BUDGET, budget)
+                    _commit_locked(txn)
+                except (OSError, ValueError, Exception):
                     # plan_resume also recognizes this pending-ledger state.
                     pass
         return {
@@ -501,35 +620,75 @@ def _authorize_iteration_extension_locked(
             f"effective limit {new_limit} exceeds defensive cap {MAX_EFFECTIVE_ITERATIONS}"
         )
     review_digest = _review_sha256(review_path)
+    authorized_at = utc_now_iso()
+    updated_at = authorized_at
+    # Upgrade any legacy v1 entries in-place (limits unchanged) so the on-disk
+    # ledger is always schema v2 after a new authorization.
+    migrated: list[dict[str, Any]] = []
+    previous_hash = GENESIS_ENTRY_HASH
+    for old in extensions:
+        if (
+            "previous_entry_hash" in old
+            and "updated_at" in old
+            and budget.get("schema_version") == 2
+        ):
+            migrated.append(old)
+            previous_hash = _entry_chain_hash(old)
+            continue
+        upgraded = dict(old)
+        upgraded["previous_entry_hash"] = previous_hash
+        upgraded["updated_at"] = upgraded.get("updated_at") or upgraded.get(
+            "authorized_at"
+        )
+        upgraded["idempotency_id"] = _extension_id_v2(run_dir.name, upgraded)
+        previous_hash = _entry_chain_hash(upgraded)
+        migrated.append(upgraded)
     entry = {
         "additional_iterations": additional_iterations,
         "previous_limit": effective_limit,
         "effective_limit": new_limit,
         "origin": origin,
-        "authorized_at": utc_now_iso(),
+        "authorized_at": authorized_at,
+        "updated_at": updated_at,
         "authorized_at_iteration": iteration,
         "review_file": review_path.name,
         "review_sha256": review_digest,
         "reviewed_diff_hash": snapshot_hash,
         "blocked_reason": reason,
+        "previous_entry_hash": previous_hash,
     }
-    entry["idempotency_id"] = _extension_id(run_dir.name, entry)
+    entry["idempotency_id"] = _extension_id_v2(run_dir.name, entry)
     document = {
         "schema_version": ITERATION_BUDGET_SCHEMA_VERSION,
         "run_id": run_dir.name,
         "original_limit": original_limit,
         "effective_limit": new_limit,
-        "extensions": [*extensions, entry],
-        "updated_at": utc_now_iso(),
+        "extensions": [*migrated, entry],
+        "updated_at": updated_at,
     }
-    atomic_write_json(run_dir / ITERATION_BUDGET, document)
-    # If interrupted after the atomic ledger write, plan_resume recognizes the
-    # pending authorization. This status change makes the normal path explicit.
-    status_transition = "completed"
+    from .txn import LogicalTransaction, TransactionError, _commit_locked
+
+    txn = LogicalTransaction(
+        run_dir=run_dir,
+        event=RunEvent.ITERATION_BUDGET_EXTENDED.value,
+        status_event=RunEvent.ITERATION_BUDGET_EXTENDED,
+        origin="resume" if origin == "cli" else "bridge",
+        _lock_name=".resume.lock",
+    )
+    txn.add_json(ITERATION_BUDGET, document)
     try:
-        transition_run(run_dir, RunEvent.ITERATION_BUDGET_EXTENDED)
-    except (OSError, ValueError):
+        # Caller already holds ``.resume.lock``; commit acquires ``.state.lock``.
+        _commit_locked(txn, state_lock_held=False)
+        status_transition = "completed"
+    except (OSError, ValueError, TransactionError):
+        # If interrupted mid-journal, recovery / plan_resume still see ledger.
         status_transition = "pending_recovery"
+        try:
+            (run_dir / ITERATION_BUDGET).lstat()
+        except FileNotFoundError:
+            raise
+        except OSError:
+            raise
     return {
         "result": "authorized",
         "idempotency_id": entry["idempotency_id"],
@@ -746,17 +905,15 @@ def attach_evidence(run_dir: Path, source: Path, *, max_bytes: int = MAX_EVIDENC
             if existing != sha256:
                 raise RunStateError("evidence destination hash mismatch")
         else:
-            temp = evidence_dir / f".{destination.name}.tmp-{os.getpid()}"
-            try:
-                with temp.open("xb") as handle:
-                    os.chmod(temp, 0o600)
-                    for chunk in chunks:
-                        handle.write(chunk)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temp, destination)
-            finally:
-                temp.unlink(missing_ok=True)
+            from .persist import secure_write_bytes
+
+            secure_write_bytes(
+                destination,
+                b"".join(chunks),
+                mode=0o600,
+                fsync_dir=True,
+                containment_root=run_dir,
+            )
         manifest_path = run_dir / EVIDENCE_MANIFEST
         if manifest_path.is_file():
             manifest = read_json(manifest_path)

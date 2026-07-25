@@ -76,11 +76,15 @@ def make_exhausted_run(
             "delivery": {"mode": "none"},
         },
     )
-    (run_dir / "iteration").write_text("3\n", encoding="utf-8")
-    (run_dir / "cursor-3.json").write_text(
+    iteration_path = run_dir / "iteration"
+    iteration_path.write_text("3\n", encoding="utf-8")
+    iteration_path.chmod(0o600)
+    cursor_path = run_dir / "cursor-3.json"
+    cursor_path.write_text(
         json.dumps({"summary": "executor iteration 3"}),
         encoding="utf-8",
     )
+    cursor_path.chmod(0o600)
     feedback = {
         "status": "CHANGES_REQUESTED",
         "summary": "KEEP_THIS_EXACT_FEEDBACK",
@@ -96,6 +100,7 @@ def make_exhausted_run(
     }
     review_path = run_dir / "review-3.json"
     review_path.write_text(json.dumps(feedback, sort_keys=True), encoding="utf-8")
+    review_path.chmod(0o600)
     snapshot = compute_diff_hash(worktree, base)
     atomic_write_json(
         run_dir / "review-3-snapshot.json",
@@ -167,7 +172,9 @@ def test_replay_after_each_interruption_point_never_adds_twice(tmp_path: Path) -
     assert read_status(env["run_dir"]) == "CHANGES_REQUESTED"
 
     # Crash before/during iteration 4 executor.
-    (env["run_dir"] / "iteration").write_text("4\n", encoding="utf-8")
+    iter4 = env["run_dir"] / "iteration"
+    iter4.write_text("4\n", encoding="utf-8")
+    iter4.chmod(0o600)
     transition_run(env["run_dir"], RunEvent.EXECUTOR_STARTED)
     third = authorize_iteration_extension(env["run_dir"], 3)
     assert third["result"] == "idempotent_replay"

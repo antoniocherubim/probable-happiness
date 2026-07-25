@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-import os
-import stat
 from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+import stat
 from typing import Iterable
 
 from .atomic import atomic_write_text, run_scoped_lock
+from .persist import PersistError, STATUS_MAX_BYTES, secure_read_text
 
 
 STATUS_FILENAME = "status"
 STATE_LOCK_FILENAME = ".state.lock"
-_MAX_STATUS_BYTES = 128
+_MAX_STATUS_BYTES = STATUS_MAX_BYTES
 
 
 class RunState(str, Enum):
@@ -150,7 +150,7 @@ def _coerce_state(value: RunState | str | None) -> RunState | None:
 
 
 def read_state(run_dir: Path | str) -> RunState | None:
-    """Read a short regular status file without following symlinks."""
+    """Read a short regular status file via the secure persistence API."""
     path = Path(run_dir) / STATUS_FILENAME
     try:
         before = path.lstat()
@@ -163,25 +163,20 @@ def read_state(run_dir: Path | str) -> RunState | None:
     if before.st_size > _MAX_STATUS_BYTES:
         raise StateTransitionError("run status is oversized")
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        try:
-            opened = os.fstat(fd)
-            if (
-                not stat.S_ISREG(opened.st_mode)
-                or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
-            ):
-                raise StateTransitionError("run status changed while opening")
-            raw = os.read(fd, _MAX_STATUS_BYTES + 1)
-        finally:
-            os.close(fd)
-    except OSError as exc:
-        raise StateTransitionError("run status cannot be read safely") from exc
-    if len(raw) > _MAX_STATUS_BYTES:
-        raise StateTransitionError("run status is oversized")
-    try:
-        value = raw.decode("utf-8").strip()
-    except UnicodeDecodeError as exc:
-        raise StateTransitionError("run status is not UTF-8") from exc
+        value = secure_read_text(
+            path,
+            max_bytes=_MAX_STATUS_BYTES,
+            require_private=True,
+        ).strip()
+    except PersistError as exc:
+        message = str(exc)
+        if "insecure mode" in message or "unexpected owner" in message:
+            raise StateTransitionError(f"run status cannot be read safely: {exc}") from exc
+        if "exceeds" in message or "oversized" in message:
+            raise StateTransitionError("run status is oversized") from exc
+        if "symlink" in message:
+            raise StateTransitionError("run status must be a regular non-symlink file") from exc
+        raise StateTransitionError(f"run status cannot be read safely: {exc}") from exc
     return _coerce_state(value)
 
 
@@ -196,8 +191,14 @@ def transition_run(
     *,
     expected_states: Iterable[RunState | str | None] | None = None,
     state_lock_held: bool = False,
+    record_audit: bool = True,
 ) -> TransitionResult:
-    """Apply a typed transition under ``.state.lock`` with CAS semantics."""
+    """Apply a typed transition under ``.state.lock`` with CAS semantics.
+
+    When ``record_audit`` is True, status publication and audit append are
+    bound through the logical transaction journal so a crash between them
+    recovers to a complete event (never status without audit).
+    """
     run_path = Path(run_dir)
     typed_event = _coerce_event(event)
     spec = TRANSITIONS[typed_event]
@@ -236,7 +237,22 @@ def transition_run(
                 f"event {typed_event.value} cannot transition "
                 f"{current.value if current else '<empty>'} to {spec.target.value}"
             )
-        atomic_write_text(run_path / STATUS_FILENAME, spec.target.value)
+        if record_audit:
+            # Journal binds status + audit. Artifact-bearing critical events
+            # must go through LogicalTransaction (enforced inside helper).
+            from .txn import TransactionError, commit_status_with_audit_locked
+
+            try:
+                commit_status_with_audit_locked(
+                    run_path, event=typed_event, origin="runner"
+                )
+            except TransactionError as exc:
+                raise StateTransitionError(str(exc)) from exc
+        else:
+            atomic_write_text(
+                run_path / STATUS_FILENAME,
+                spec.target.value,
+            )
         return TransitionResult(
             event=typed_event,
             previous=current,

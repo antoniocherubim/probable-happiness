@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# DX-08: private-by-default artifacts from the shell engine.
+umask 077
+
 AGENT_LOOP_SCRIPT_TOOL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 
 usage() {
@@ -399,9 +402,9 @@ _run_task_entry() {
     trap 'handle_loop_signal INT 130' INT
     trap 'handle_loop_signal TERM 143' TERM
     trap 'handle_loop_signal HUP 129' HUP
-    printf '%s\n' "$BASE_COMMIT" > "$RUN_DIR/base_commit"
-    printf '%s\n' "$WORKTREE" > "$RUN_DIR/worktree"
-    printf '%s\n' "$TASK_FILE" > "$RUN_DIR/task_file"
+    DX_CLI persist-text --run-dir "$RUN_DIR" --name base_commit --value "$BASE_COMMIT" || die "failed to persist base_commit"
+    DX_CLI persist-text --run-dir "$RUN_DIR" --name worktree --value "$WORKTREE" || die "failed to persist worktree"
+    DX_CLI persist-text --run-dir "$RUN_DIR" --name task_file --value "$TASK_FILE" || die "failed to persist task_file"
     INIT_ARGS=(init-run --run-dir "$RUN_DIR" --repo "$REPO_ROOT" --worktree "$WORKTREE" \
       --task-file "$TASK_FILE" --base-commit "$BASE_COMMIT" --max-iterations "$MAX_ITERATIONS")
     if [[ -n "$ENV_FILE" ]]; then INIT_ARGS+=(--env-file "$ENV_FILE"); fi
@@ -447,7 +450,7 @@ _run_task_entry() {
   fi
 
   for ((iteration = START_ITERATION; iteration <= MAX_ITERATIONS; iteration++)); do
-    printf '%s\n' "$iteration" > "$RUN_DIR/iteration"
+    DX_CLI persist-text --run-dir "$RUN_DIR" --name iteration --value "$iteration" || die "failed to persist iteration"
     EXECUTOR_REPORT="$RUN_DIR/cursor-${iteration}.json"
     if [[ "$START_PHASE" == "executor" ]]; then
       CURRENT_PHASE="executor"
@@ -533,7 +536,9 @@ _run_task_entry() {
     BEFORE_DIFF="$RUN_DIR/before-review-${iteration}.diff"
     AFTER_DIFF="$RUN_DIR/after-review-${iteration}.diff"
     git -C "$WORKTREE" diff --binary "$BASE_COMMIT" -- > "$BEFORE_DIFF.tmp"
-    mv "$BEFORE_DIFF.tmp" "$BEFORE_DIFF"
+    DX_CLI publish-file --run-dir "$RUN_DIR" --name "$(basename "$BEFORE_DIFF")" \
+      --source "$BEFORE_DIFF.tmp" --max-bytes 67108864 --no-require-private \
+      || die "failed to publish before-review diff"
 
     set +e
     BEFORE_HASH="$(compute_reviewed_snapshot_hash "$WORKTREE" "$BASE_COMMIT")"
@@ -561,10 +566,14 @@ _run_task_entry() {
       block_run "Codex review failed with exit $CODEX_EXIT" reviewer "$(basename "$REVIEW_CANDIDATE")" "$CODEX_REASON"
       die "Codex review failed with exit $CODEX_EXIT; run directory: $RUN_DIR"
     fi
-    mv "$REVIEW_CANDIDATE" "$REVIEW_FILE"
+    DX_CLI publish-file --run-dir "$RUN_DIR" --name "$(basename "$REVIEW_FILE")" \
+      --source "$REVIEW_CANDIDATE" --no-require-private \
+      || die "failed to publish reviewer report"
 
     git -C "$WORKTREE" diff --binary "$BASE_COMMIT" -- > "$AFTER_DIFF.tmp"
-    mv "$AFTER_DIFF.tmp" "$AFTER_DIFF"
+    DX_CLI publish-file --run-dir "$RUN_DIR" --name "$(basename "$AFTER_DIFF")" \
+      --source "$AFTER_DIFF.tmp" --max-bytes 67108864 --no-require-private \
+      || die "failed to publish after-review diff"
 
     set +e
     AFTER_HASH="$(compute_reviewed_snapshot_hash "$WORKTREE" "$BASE_COMMIT")"

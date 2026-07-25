@@ -187,12 +187,14 @@ def test_callback_replay_repairs_status_after_decision_publication_crash(
         review_report="review.json",
     )
 
-    original_transition_run = approval_mod.transition_run
+    import dx.txn as txn_mod
+
+    original_transition_run = txn_mod.transition_run
     crash_once = {"armed": True}
 
     def crash_before_human_approved(
         target_run_dir: Path,
-        event: RunEvent,
+        event: object,
         **kwargs: object,
     ) -> object:
         if event == RunEvent.HUMAN_APPROVED and crash_once["armed"]:
@@ -202,7 +204,7 @@ def test_callback_replay_repairs_status_after_decision_publication_crash(
             raise RuntimeError("simulated crash after decision publication")
         return original_transition_run(target_run_dir, event, **kwargs)
 
-    monkeypatch.setattr(approval_mod, "transition_run", crash_before_human_approved)
+    monkeypatch.setattr(txn_mod, "transition_run", crash_before_human_approved)
 
     with pytest.raises(RuntimeError, match="simulated crash after decision publication"):
         _approve(run_dir, request, user_id=9)
@@ -310,19 +312,21 @@ def test_post_hash_mutation_during_claim_does_not_alter_approved_hash(
         diff_hash=reviewed,
     )
 
-    original_excl = approval_mod.exclusive_write_json
+    import dx.txn as txn_mod
+
+    original_excl = txn_mod.secure_exclusive_write_json
     in_publish = threading.Barrier(2)
     mutate_done = threading.Event()
     results: list[str] = []
 
-    def gated_excl(path: Path, payload: dict, mode: int = 0o600) -> bool:
+    def gated_excl(path: Path, payload: dict, **kwargs: object) -> bool:
         if Path(path).name == "human_approval_decision.json":
             in_publish.wait(timeout=10)
             assert mutate_done.wait(timeout=10), "mutator did not finish"
             assert payload["diff_hash"] == reviewed
-        return original_excl(path, payload, mode=mode)
+        return original_excl(path, payload, **kwargs)
 
-    monkeypatch.setattr(approval_mod, "exclusive_write_json", gated_excl)
+    monkeypatch.setattr(txn_mod, "secure_exclusive_write_json", gated_excl)
 
     def claimer() -> None:
         result, decision = _approve(run_dir, request, user_id=21)
@@ -368,10 +372,9 @@ def test_forged_and_incomplete_decisions_do_not_promote(
         "run_id": request["run_id"],
         "diff_hash": request["diff_hash"],
     }
-    (run_dir / "human_approval_decision.json").write_text(
-        json.dumps(minimal) + "\n",
-        encoding="utf-8",
-    )
+    decision_path = run_dir / "human_approval_decision.json"
+    decision_path.write_text(json.dumps(minimal) + "\n", encoding="utf-8")
+    decision_path.chmod(0o600)
     with pytest.raises(ApprovalError):
         validate_decision_matches_request(run_dir)
     assert wait_for_decision(run_dir, timeout_sec=1, poll_interval=0.2) is False
@@ -387,10 +390,8 @@ def test_forged_and_incomplete_decisions_do_not_promote(
         "telegram_user_id": 9,
         "telegram_chat_id": 9,
     }
-    (run_dir / "human_approval_decision.json").write_text(
-        json.dumps(incomplete) + "\n",
-        encoding="utf-8",
-    )
+    decision_path.write_text(json.dumps(incomplete) + "\n", encoding="utf-8")
+    decision_path.chmod(0o600)
     with pytest.raises(ApprovalError, match="token not consumed"):
         validate_decision_matches_request(run_dir)
     assert wait_for_decision(run_dir, timeout_sec=1, poll_interval=0.2) is False
@@ -403,10 +404,9 @@ def test_forged_and_incomplete_decisions_do_not_promote(
     req = json.loads(request_path.read_text(encoding="utf-8"))
     req["token_consumed"] = True
     request_path.write_text(json.dumps(req, indent=2) + "\n", encoding="utf-8")
-    (run_dir / "human_approval_decision.json").write_text(
-        json.dumps(forged) + "\n",
-        encoding="utf-8",
-    )
+    request_path.chmod(0o600)
+    decision_path.write_text(json.dumps(forged) + "\n", encoding="utf-8")
+    decision_path.chmod(0o600)
     with pytest.raises(ApprovalError, match="callback_token"):
         validate_decision_matches_request(run_dir)
     assert wait_for_decision(run_dir, timeout_sec=1, poll_interval=0.2) is False
@@ -599,10 +599,12 @@ def test_wait_success_from_decision_publication_phases(
     # Phase: authentic decision published, status not yet terminal human approval.
     req = load_request(run_dir)
     req["token_consumed"] = True
-    (run_dir / "human_approval_request.json").write_text(
+    request_path = run_dir / "human_approval_request.json"
+    request_path.write_text(
         json.dumps(req, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    request_path.chmod(0o600)
     decision = {
         "schema_version": 1,
         "decision": "approve",
@@ -657,19 +659,21 @@ def test_wait_timeout_cleanup_serialized_with_claim_publication(
         review_report="review.json",
     )
 
-    original_excl = approval_mod.exclusive_write_json
+    import dx.txn as txn_mod
+
+    original_excl = txn_mod.secure_exclusive_write_json
     decision_written = threading.Event()
     finish_claim = threading.Event()
 
-    def gated_excl(path: Path, payload: dict, mode: int = 0o600) -> bool:
-        created = original_excl(path, payload, mode=mode)
+    def gated_excl(path: Path, payload: dict, **kwargs: object) -> bool:
+        created = original_excl(path, payload, **kwargs)
         if created and Path(path).name == "human_approval_decision.json":
             # Still inside run_scoped_lock; pause before status promotion.
             decision_written.set()
             assert finish_claim.wait(timeout=10), "finish_claim not signaled"
         return created
 
-    monkeypatch.setattr(approval_mod, "exclusive_write_json", gated_excl)
+    monkeypatch.setattr(txn_mod, "secure_exclusive_write_json", gated_excl)
 
     ticks = {"n": 0}
 
@@ -718,7 +722,9 @@ def test_create_request_publication_serialized_with_callback_claim(
     run_dir = tmp_path / "runs" / "run-create-claim-race"
     run_dir.mkdir(parents=True)
 
-    original_write_json = approval_mod.atomic_write_json
+    import dx.txn as txn_mod
+
+    original_write_json = txn_mod.secure_write_json
     request_published = threading.Event()
     finish_create = threading.Event()
     callback_started = threading.Event()
@@ -726,8 +732,8 @@ def test_create_request_publication_serialized_with_callback_claim(
     published_token: dict[str, str] = {}
     gated_once = {"done": False}
 
-    def gated_write_json(path: Path, payload: dict, mode: int = 0o600) -> None:
-        original_write_json(path, payload, mode=mode)
+    def gated_write_json(path: Path, payload: dict, **kwargs: object) -> None:
+        original_write_json(path, payload, **kwargs)
         if Path(path).name != "human_approval_request.json" or gated_once["done"]:
             return
         gated_once["done"] = True
@@ -740,7 +746,7 @@ def test_create_request_publication_serialized_with_callback_claim(
         assert read_status(run_dir) == STATUS_APPROVED
         assert load_decision(run_dir) is None
 
-    monkeypatch.setattr(approval_mod, "atomic_write_json", gated_write_json)
+    monkeypatch.setattr(txn_mod, "secure_write_json", gated_write_json)
 
     def publisher() -> None:
         create_approval_request(
@@ -858,11 +864,13 @@ def test_interrupted_awaiting_publication_recovers_without_token_rotation(
         task_id="DX-01",
     )
 
-    original_write_json = approval_mod.atomic_write_json
+    import dx.persist as persist_mod
+
+    original_write_json = persist_mod.secure_write_json
     crash_once = {"armed": True}
 
-    def crash_after_request_publish(path: Path, payload: dict, mode: int = 0o600) -> None:
-        original_write_json(path, payload, mode=mode)
+    def crash_after_request_publish(path: Path, payload: dict, **kwargs: object) -> None:
+        original_write_json(path, payload, **kwargs)
         if Path(path).name != "human_approval_request.json" or not crash_once["armed"]:
             return
         crash_once["armed"] = False
@@ -870,7 +878,11 @@ def test_interrupted_awaiting_publication_recovers_without_token_rotation(
         assert load_decision(run_dir) is None
         raise KeyboardInterrupt("simulated crash after request publish")
 
-    monkeypatch.setattr(approval_mod, "atomic_write_json", crash_after_request_publish)
+    monkeypatch.setattr(persist_mod, "secure_write_json", crash_after_request_publish)
+    # txn imports the symbol by name; patch the bound reference too.
+    import dx.txn as txn_mod
+
+    monkeypatch.setattr(txn_mod, "secure_write_json", crash_after_request_publish)
 
     _arm_technical_approved(run_dir)
     with pytest.raises(KeyboardInterrupt, match="simulated crash"):
@@ -1000,10 +1012,9 @@ def test_stale_orphan_decision_artifacts_handled_safely(
         "telegram_user_id": 1,
         "telegram_chat_id": 1,
     }
-    (stale_dir / "human_approval_decision.json").write_text(
-        json.dumps(stale_payload, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    stale_path = stale_dir / "human_approval_decision.json"
+    stale_path.write_text(json.dumps(stale_payload, indent=2) + "\n", encoding="utf-8")
+    stale_path.chmod(0o600)
     returned = create_approval_request(
         run_dir=stale_dir,
         task="docs/tasks/DX-01.md",
@@ -1037,21 +1048,23 @@ def test_callback_versus_mismatched_recreate_interleaving(
         task_id="DX-01",
     )
 
-    original_excl = approval_mod.exclusive_write_json
+    import dx.txn as txn_mod
+
+    original_excl = txn_mod.secure_exclusive_write_json
     decision_published = threading.Event()
     finish_claim = threading.Event()
     recreate_started = threading.Event()
     claim_results: list[str] = []
     recreate_errors: list[BaseException] = []
 
-    def gated_excl(path: Path, payload: dict, mode: int = 0o600) -> bool:
-        created = original_excl(path, payload, mode=mode)
+    def gated_excl(path: Path, payload: dict, **kwargs: object) -> bool:
+        created = original_excl(path, payload, **kwargs)
         if created and Path(path).name == "human_approval_decision.json":
             decision_published.set()
             assert finish_claim.wait(timeout=10), "finish_claim not signaled"
         return created
 
-    monkeypatch.setattr(approval_mod, "exclusive_write_json", gated_excl)
+    monkeypatch.setattr(txn_mod, "secure_exclusive_write_json", gated_excl)
 
     def claimer() -> None:
         result, _decision = apply_human_approval(
@@ -1278,19 +1291,21 @@ def test_create_callback_notification_race_skips_stale_button(
         task_id="DX-01",
     )
 
-    original_excl = approval_mod.exclusive_write_json
+    import dx.txn as txn_mod
+
+    original_excl = txn_mod.secure_exclusive_write_json
     decision_published = threading.Event()
     finish_claim = threading.Event()
     notify_results: list[dict | None] = []
 
-    def gated_excl(path: Path, payload: dict, mode: int = 0o600) -> bool:
-        created = original_excl(path, payload, mode=mode)
+    def gated_excl(path: Path, payload: dict, **kwargs: object) -> bool:
+        created = original_excl(path, payload, **kwargs)
         if created and Path(path).name == "human_approval_decision.json":
             decision_published.set()
             assert finish_claim.wait(timeout=10), "finish_claim not signaled"
         return created
 
-    monkeypatch.setattr(approval_mod, "exclusive_write_json", gated_excl)
+    monkeypatch.setattr(txn_mod, "secure_exclusive_write_json", gated_excl)
 
     def claimer() -> None:
         apply_human_approval(
@@ -1331,7 +1346,9 @@ def test_create_callback_notification_race_skips_stale_button(
 def test_blocked_notify_has_no_approval_button(tmp_path: Path) -> None:
     run_dir = tmp_path / "runs" / "run-blocked"
     run_dir.mkdir(parents=True)
-    (run_dir / "status").write_text(STATUS_BLOCKED + "\n", encoding="utf-8")
+    status_path = run_dir / "status"
+    status_path.write_text(STATUS_BLOCKED + "\n", encoding="utf-8")
+    status_path.chmod(0o600)
     payload = enqueue_notification(
         run_dir=run_dir,
         kind="blocked",

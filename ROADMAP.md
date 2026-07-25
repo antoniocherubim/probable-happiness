@@ -37,6 +37,9 @@ Commit, integração e push permanecem ações manuais fora do runner estável.
 - [x] DX-06C: delivery remoto removido e integração Git tornada manual;
 - [x] DX-07: máquina de estados tipada com CAS, lock e writers centralizados
   (implementada; aguardando revisão formal);
+- [x] DX-08: persistência segura com API no-follow (containment sem seguir
+  symlink), journal sob `.state.lock`, audit, migrations com dry-run/rollback
+  validados e fsync de diretório (implementada; aguardando revisão formal);
 - [x] suíte local com testes determinísticos;
 - [x] aprovação local não cria commit, branch ou job de rede.
 
@@ -53,10 +56,11 @@ Commit, integração e push permanecem ações manuais fora do runner estável.
 | M6 | P1 | Operação e documentação para terceiros | M4–M5 |
 | M7 | Gate | Alpha externa, beta pública e release estável | M0–M6 |
 
-Próxima entrega recomendada: **DX-08 / M1 — persistência segura, durável e
-migrável**. DX-07 está implementada com evidência de suíte completa
-(314 passed) e aguarda revisão formal; DX-08 deve tornar atômicos e
-recuperáveis os pares entre estado, artefatos e notificações.
+Próxima entrega recomendada: **DX-09 / M2 — cgroups e limites de
+recursos/saída**. O marco M1 (DX-07 + DX-08) está implementado com evidência de
+suíte (359 passed); ambas as tasks aguardam revisão formal. Riscos residuais da
+DX-08 (outbox fora do create, fixtures sintéticas, matriz de fault injection não
+exaustiva por evento) estão documentados em `docs/tasks/DX-08.md`.
 
 ### Tasks preparadas até M2
 
@@ -66,8 +70,8 @@ recuperáveis os pares entre estado, artefatos e notificações.
 | 2 | M0 | [DX-06](docs/tasks/DX-06.md) | candidata de hardening não aprovada |
 | 3 | M0 | [DX-06B](docs/tasks/DX-06B.md) | experimento de staging/push não aprovado |
 | 4 | M0 | [DX-06C](docs/tasks/DX-06C.md) | concluída: aprovação local terminal |
-| 5 | M1 | [DX-07](docs/tasks/DX-07.md) | implementada (314 passed); aguarda revisão formal |
-| 6 | M1 | [DX-08](docs/tasks/DX-08.md) | persistência segura, durável e migrável |
+| 5 | M1 | [DX-07](docs/tasks/DX-07.md) | implementada; aguarda revisão formal |
+| 6 | M1 | [DX-08](docs/tasks/DX-08.md) | implementada; aguarda revisão formal |
 | 7 | M2 | [DX-09](docs/tasks/DX-09.md) | cgroups e limites de recursos/saída |
 | 8 | M2 | [DX-10](docs/tasks/DX-10.md) | segredos por fase, streaming e retenção segura |
 
@@ -112,28 +116,38 @@ Tasks: [DX-07](docs/tasks/DX-07.md) e [DX-08](docs/tasks/DX-08.md).
 - [x] trocar escritas diretas de status por compare-and-set sob lock;
 - [ ] exigir estado aprovado válido antes de qualquer integração futura;
 - [x] entradas inválidas devem falhar sem sobrescrever o estado anterior;
-- [ ] centralizar leitura segura com `O_NOFOLLOW`, arquivo regular, owner e modo;
-- [ ] usar `umask 077`, diretórios `0700` e arquivos sensíveis `0600`;
-- [ ] executar `fsync` do diretório após `replace`, link e criação de artefatos;
-- [ ] vincular timestamps e cada entrada do ledger à cadeia de integridade;
-- [ ] escolher e documentar o modelo de ameaça:
+- [x] centralizar leitura/escrita segura com `O_NOFOLLOW`, arquivo regular,
+  owner e modo (`require_private=True` nos caminhos de produção; inspect/migrate
+  legados podem relaxar explicitamente; containment não resolve symlinks);
+- [x] usar `umask 077`, diretórios `0700` e arquivos sensíveis `0600`;
+- [x] executar `fsync` do diretório após `replace`, link e criação de artefatos
+  (CLI `persist-text`/`publish-file` no runner; FS sem suporte falha fechado);
+- [x] vincular `authorized_at`, `updated_at` e cada entrada do ledger à cadeia
+  de integridade;
+- [x] escolher e documentar o modelo de ameaça:
   - baseline: processos com o mesmo UID são confiáveis;
-  - hardened: worker/bridge em usuários separados e autenticação keyed do ledger;
-- [ ] criar migrations versionadas para run, profile, approval e ledger;
-- [ ] avaliar SQLite/WAL para transações, índices e outbox, mantendo export JSON
-  auditável.
+  - hardened: não anunciado nesta release (exige chave inacessível ao executor);
+- [x] criar migrations versionadas para run, profile, approval e ledger
+  (dry-run/futuro sem mutação; rollback remove criados e valida hashes);
+- [x] avaliar SQLite/WAL vs JSON+journal (ADR-001 escolheu JSON+journal).
 
 ### Critérios de saída
 
 - nenhuma API pública consegue promover um run `BLOCKED` ou não aprovado;
-- fault injection cobre cada fronteira entre artefato, status e notificação;
+- fault injection cobre fronteiras da API comum (write/fsync/replace/dir fsync)
+  e journals preparing/committing dos eventos críticos testados; matriz
+  exaustiva por **cada** evento DX-07 ainda é risco residual documentado;
 - qualquer arquivo truncado, symlink, modo/owner incorreto ou schema futuro falha
-  fechado e com diagnóstico acionável;
+  fechado e com diagnóstico acionável (resume e migration);
 - runs das duas versões persistidas anteriores migram ou recusam retomada sem
   mutação;
 - o baseline declara o mesmo UID como fronteira de confiança; se um modo
   hardened for anunciado, ele demonstra que o executor não consegue forjar
   aprovação ou extensão.
+
+M1 implementação: DX-07 + DX-08 entregues com evidência de testes (359 passed);
+revisão formal ainda pendente antes de marcar o marco como fechado
+operacionalmente.
 
 ## M2 — Limitar processos, recursos e exposição de segredos
 

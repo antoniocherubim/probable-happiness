@@ -15,11 +15,11 @@ from typing import Any
 
 from .atomic import (
     atomic_write_json,
-    exclusive_write_json,
     read_json,
     run_scoped_lock,
 )
-from .state_machine import RunEvent, RunState, read_status, transition_run
+from .state_machine import RunEvent, RunState, read_status
+from .txn import LogicalTransaction, TransactionError, _commit_locked
 
 STATUS_APPROVED = RunState.APPROVED.value
 STATUS_AWAITING = RunState.AWAITING_HUMAN_APPROVAL.value
@@ -187,6 +187,9 @@ def create_approval_request(
     review_report: str,
     diff_hash: str | None = None,
     task_id: str | None = None,
+    notify_summary: str | None = None,
+    notify_messages: list[str] | None = None,
+    report_hint: str = "",
 ) -> dict[str, Any]:
     """
     Persist an atomic human-approval request after technical APPROVED.
@@ -194,6 +197,10 @@ def create_approval_request(
     ``diff_hash`` should be the content-addressed snapshot that was hashed
     immediately before and after Codex review (equal). The human gate approves
     that immutable hash — it does not claim the live worktree is frozen.
+
+    When ``notify_summary`` is provided, ``telegram_notify.json`` is published
+    in the same logical transaction as the request and ``AWAITING_HUMAN_APPROVAL``
+    status so crash recovery cannot leave status without outbox (or vice versa).
 
     State machine (under the run-scoped lock):
     - A **new** request may open only when public status is already technical
@@ -247,12 +254,30 @@ def create_approval_request(
             if _decision_ready_locked(run_dir):
                 return existing
             status = read_status(run_dir)
-            # Interrupted after atomic request publish but before AWAITING:
-            # promote technical APPROVED → AWAITING so the callback can claim.
+            # Interrupted after request publish but before AWAITING: complete the
+            # logical transaction with the existing request (token unchanged).
             if status == STATUS_APPROVED:
-                transition_run(run_dir, RunEvent.APPROVAL_REQUESTED)
-            # AWAITING: idempotent. BLOCKED / HUMAN_APPROVED / other: no-op
-            # (never reopen or downgrade).
+                txn = LogicalTransaction(
+                    run_dir=run_dir,
+                    event=RunEvent.APPROVAL_REQUESTED.value,
+                    status_event=RunEvent.APPROVAL_REQUESTED,
+                    origin="runner",
+                    _lock_name=LOCK_FILENAME,
+                )
+                txn.add_json(REQUEST_FILENAME, existing)
+                notify = _build_awaiting_notify(
+                    run_dir,
+                    existing,
+                    summary=notify_summary or f"Awaiting human approval for {existing.get('task_id', '')}",
+                    report_hint=report_hint or Path(str(existing.get("review_report", ""))).name,
+                    messages=notify_messages,
+                )
+                if notify is not None:
+                    txn.add_json(NOTIFY_FILENAME, notify)
+                try:
+                    _commit_locked(txn)
+                except TransactionError as exc:
+                    raise ApprovalError(str(exc)) from exc
             return existing
 
         # No request yet — new gate only from technical APPROVED.
@@ -278,12 +303,56 @@ def create_approval_request(
             "token_consumed": False,
             "created_at": utc_now_iso(),
         }
-        # Caller already recorded technical APPROVED; publish request then
-        # AWAITING before the lock is released so claims cannot observe a
-        # half-published gate.
-        atomic_write_json(request_path, request)
-        transition_run(run_dir, RunEvent.APPROVAL_REQUESTED)
+        txn = LogicalTransaction(
+            run_dir=run_dir,
+            event=RunEvent.APPROVAL_REQUESTED.value,
+            status_event=RunEvent.APPROVAL_REQUESTED,
+            origin="runner",
+            _lock_name=LOCK_FILENAME,
+        )
+        txn.add_json(REQUEST_FILENAME, request)
+        if notify_summary is not None:
+            notify = _build_awaiting_notify(
+                run_dir,
+                request,
+                summary=notify_summary,
+                report_hint=report_hint or Path(review_report).name,
+                messages=notify_messages,
+            )
+            if notify is not None:
+                txn.add_json(NOTIFY_FILENAME, notify)
+        try:
+            _commit_locked(txn)
+        except TransactionError as exc:
+            raise ApprovalError(str(exc)) from exc
         return request
+
+
+def _build_awaiting_notify(
+    run_dir: Path,
+    request: dict[str, Any],
+    *,
+    summary: str,
+    report_hint: str,
+    messages: list[str] | None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "awaiting_human_approval",
+        "run_id": run_id_from_dir(run_dir),
+        "status": STATUS_AWAITING,
+        "summary": truncate_message(summary),
+        "report_hint": report_hint,
+        "created_at": utc_now_iso(),
+        "notification_id": secrets.token_hex(8),
+        "sent_at": None,
+        "offer_approval_button": True,
+        "callback_token": request["callback_token"],
+        "diff_hash": request["diff_hash"],
+        "task_id": request.get("task_id", ""),
+        "messages": messages or [truncate_message(summary)],
+        "sent_message_ids": [],
+    }
 
 
 def _awaiting_button_publish_allowed_locked(run_dir: Path) -> dict[str, Any] | None:
@@ -307,7 +376,20 @@ def _awaiting_button_publish_allowed_locked(run_dir: Path) -> dict[str, Any] | N
             pass
         else:
             if read_status(run_dir) == STATUS_AWAITING:
-                transition_run(run_dir, RunEvent.RECOVER_HUMAN_APPROVED)
+                decision = load_decision(run_dir)
+                if decision is not None:
+                    txn = LogicalTransaction(
+                        run_dir=run_dir,
+                        event=RunEvent.RECOVER_HUMAN_APPROVED.value,
+                        status_event=RunEvent.RECOVER_HUMAN_APPROVED,
+                        origin="bridge",
+                        _lock_name=LOCK_FILENAME,
+                    )
+                    txn.add_json(DECISION_FILENAME, decision)
+                    try:
+                        _commit_locked(txn)
+                    except TransactionError:
+                        pass
             return None
     try:
         return read_json(request_path)
@@ -389,15 +471,21 @@ def truncate_message(text: str, limit: int = MESSAGE_SOFT_LIMIT) -> str:
     return text[: max(0, limit - 16)].rstrip() + "\n…[truncated]"
 
 
-def load_request(run_dir: Path) -> dict[str, Any]:
-    return read_json(Path(run_dir) / REQUEST_FILENAME)
-
-
 def load_decision(run_dir: Path) -> dict[str, Any] | None:
     path = Path(run_dir) / DECISION_FILENAME
     if not path.is_file():
         return None
-    return read_json(path)
+    try:
+        return read_json(path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise ApprovalError(f"corrupt or insecure approval decision: {exc}") from exc
+
+
+def load_request(run_dir: Path) -> dict[str, Any]:
+    try:
+        return read_json(Path(run_dir) / REQUEST_FILENAME)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise ApprovalError(f"corrupt or insecure approval request: {exc}") from exc
 
 
 def find_run_dir_by_token(runs_root: Path, token: str) -> Path | None:
@@ -489,7 +577,18 @@ def _idempotent_replay_locked(
     """
     current = read_status(run_dir)
     if current == STATUS_AWAITING:
-        transition_run(run_dir, RunEvent.RECOVER_HUMAN_APPROVED)
+        txn = LogicalTransaction(
+            run_dir=run_dir,
+            event=RunEvent.RECOVER_HUMAN_APPROVED.value,
+            status_event=RunEvent.RECOVER_HUMAN_APPROVED,
+            origin="bridge",
+            _lock_name=LOCK_FILENAME,
+        )
+        txn.add_json(DECISION_FILENAME, existing)
+        try:
+            _commit_locked(txn)
+        except TransactionError as exc:
+            raise ApprovalError(str(exc)) from exc
     elif current not in {
         STATUS_HUMAN_APPROVED,
         STATUS_DELIVERING,
@@ -544,9 +643,10 @@ def _claim_human_approval_locked(
         if existing is not None:
             return "rejected_token", {}
     else:
-        # Mark consumed before exclusive publish so waiters never accept an unbound decision.
+        # Mark consumed inside the same journal as the decision so waiters never
+        # accept an unbound decision and crashes recover via the journal.
+        request = dict(request)
         request["token_consumed"] = True
-        atomic_write_json(request_path, request)
 
     expected_hash = request["diff_hash"]
     decision = {
@@ -560,16 +660,24 @@ def _claim_human_approval_locked(
         "request_created_at": request.get("created_at"),
         "decided_at": utc_now_iso(),
     }
-    decision_path = run_dir / DECISION_FILENAME
-    # Exclusive publish is the one-use claim; losers see a stable idempotent replay.
-    if not exclusive_write_json(decision_path, decision):
+    # Exclusive decision + request update + HUMAN_APPROVED in one journal.
+    txn = LogicalTransaction(
+        run_dir=run_dir,
+        event=RunEvent.HUMAN_APPROVED.value,
+        status_event=RunEvent.HUMAN_APPROVED,
+        origin="bridge",
+        _lock_name=LOCK_FILENAME,
+    )
+    txn.add_json(REQUEST_FILENAME, request)
+    txn.add_json(DECISION_FILENAME, decision, exclusive=True)
+    try:
+        _commit_locked(txn)
+    except TransactionError:
         request = read_json(request_path)
         existing = load_decision(run_dir)
         if existing is not None and _decision_matches_request(existing, request, callback_token):
             return _idempotent_replay_locked(run_dir, existing)
         return "rejected_wrong_state", existing or {}
-
-    transition_run(run_dir, RunEvent.HUMAN_APPROVED)
     return "accepted", decision
 
 
@@ -686,7 +794,21 @@ def _decision_ready_locked(run_dir: Path) -> bool:
         return False
     current = read_status(run_dir)
     if current == STATUS_AWAITING:
-        transition_run(run_dir, RunEvent.RECOVER_HUMAN_APPROVED)
+        decision = load_decision(run_dir)
+        if decision is None:
+            return False
+        txn = LogicalTransaction(
+            run_dir=run_dir,
+            event=RunEvent.RECOVER_HUMAN_APPROVED.value,
+            status_event=RunEvent.RECOVER_HUMAN_APPROVED,
+            origin="bridge",
+            _lock_name=LOCK_FILENAME,
+        )
+        txn.add_json(DECISION_FILENAME, decision)
+        try:
+            _commit_locked(txn)
+        except TransactionError:
+            return False
         return True
     if current not in {
         STATUS_HUMAN_APPROVED,
@@ -809,18 +931,28 @@ def apply_human_rejection(
         if request.get("callback_token") != callback_token or request.get("token_consumed"):
             return "rejected_token"
         request["token_consumed"] = True
-        atomic_write_json(request_path, request)
-        atomic_write_json(
-            run_dir / "human_rejection.json",
-            {
-                "schema_version": SCHEMA_VERSION,
-                "decision": "reject",
-                "run_id": request.get("run_id"),
-                "diff_hash": request.get("diff_hash"),
-                "telegram_user_id": telegram_user_id,
-                "telegram_chat_id": telegram_chat_id,
-                "decided_at": utc_now_iso(),
-            },
+        rejection = {
+            "schema_version": SCHEMA_VERSION,
+            "decision": "reject",
+            "run_id": request.get("run_id"),
+            "diff_hash": request.get("diff_hash"),
+            "telegram_user_id": telegram_user_id,
+            "telegram_chat_id": telegram_chat_id,
+            "decided_at": utc_now_iso(),
+        }
+        from .txn import LogicalTransaction, TransactionError, _commit_locked
+
+        txn = LogicalTransaction(
+            run_dir=run_dir,
+            event=RunEvent.HUMAN_REJECTED.value,
+            status_event=RunEvent.HUMAN_REJECTED,
+            origin="bridge",
+            _lock_name=LOCK_FILENAME,
         )
-        transition_run(run_dir, RunEvent.HUMAN_REJECTED)
+        txn.add_json(REQUEST_FILENAME, request)
+        txn.add_json("human_rejection.json", rejection)
+        try:
+            _commit_locked(txn)
+        except TransactionError:
+            return "rejected_wrong_state"
         return "rejected"

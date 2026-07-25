@@ -54,3 +54,20 @@ O arquivo `status` não deve mais ser editado por scripts ou integrações. O
 runner usa eventos tipados, compare-and-set e `.state.lock`; o comando interno
 arbitrário `set-status` foi removido. Runs legados em `DELIVERING`,
 `DELIVERY_FAILED` ou `PUSHED` continuam inspecionáveis, mas são terminais.
+
+## Persistência segura (DX-08)
+
+Novos runs gravam `runner_version` e `persistence_schema` em `run.json`.
+Escritas usam `umask 077`, artefatos `0600` e `fsync` do diretório após
+replace/link. Para inspecionar ou migrar:
+
+```bash
+agent-loop inspect --run-dir <run>
+agent-loop migrate --run-dir <run> --dry-run
+agent-loop migrate --run-dir <run>
+agent-loop verify-state --run-dir <run> [--recover]
+```
+
+Schema futuro desconhecido recusa mutação. Delivery legado permanece
+somente leitura. Detalhes em [`docs/BACKUP_RECOVERY.md`](docs/BACKUP_RECOVERY.md)
+e [`docs/adr/ADR-001-persistence-backend.md`](docs/adr/ADR-001-persistence-backend.md).

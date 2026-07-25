@@ -91,7 +91,9 @@ def make_run(tmp_path: Path) -> tuple[Path, Path, Path, str]:
             "profile": ProjectProfile().public_dict(),
         },
     )
-    (run_dir / "iteration").write_text("1\n", encoding="utf-8")
+    iteration_path = run_dir / "iteration"
+    iteration_path.write_text("1\n", encoding="utf-8")
+    iteration_path.chmod(0o600)
     return repo, worktree, run_dir, base
 
 
