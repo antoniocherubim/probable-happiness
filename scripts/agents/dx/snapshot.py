@@ -495,8 +495,12 @@ def validate_reviewer_report(data: Any) -> dict[str, Any]:
     return data
 
 
-def _validate_executor_envelope(data: Any) -> dict[str, Any]:
-    """Fail closed unless the payload is the production Cursor Agent envelope."""
+def validate_executor_envelope(data: Any) -> dict[str, Any]:
+    """Fail closed unless the payload is the production Cursor Agent envelope.
+
+    Shared contract for ``prepare_review_artifacts``, resume presence checks, and
+    iteration-budget authorization — do not diverge a second schema elsewhere.
+    """
     if not isinstance(data, dict):
         raise SnapshotError("executor report must be a JSON object")
     unknown = set(data) - _CURSOR_AGENT_RESULT_KEYS
@@ -536,7 +540,7 @@ def _executor_summary(path: Path) -> tuple[str, list[str]]:
         raise SnapshotError(f"executor report cannot be read safely: {exc}") from exc
     except (OSError, ValueError) as exc:
         raise SnapshotError(f"executor report cannot be read safely: {exc}") from exc
-    validated = _validate_executor_envelope(data)
+    validated = validate_executor_envelope(data)
     raw = sanitize_text(validated["result"].strip())[:1600]
     return raw or "não informado", []
 

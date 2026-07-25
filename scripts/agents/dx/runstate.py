@@ -271,23 +271,6 @@ def _regular_report_present(path: Path, *, label: str) -> bool:
     return True
 
 
-# Production Cursor Agent ``--output-format json`` result envelope persisted by
-# ``run_task.sh`` / ``supervise`` (stdout of cursor-agent). Synthetic
-# ``{"summary": ...}`` fixtures are not the on-disk production contract.
-_CURSOR_AGENT_RESULT_KEYS = frozenset(
-    {
-        "type",
-        "subtype",
-        "is_error",
-        "duration_ms",
-        "duration_api_ms",
-        "result",
-        "session_id",
-        "request_id",
-        "usage",
-    }
-)
-_CURSOR_AGENT_RESULT_REQUIRED = _CURSOR_AGENT_RESULT_KEYS
 _REVIEW_REPORT_KEYS = frozenset(
     {"schema_version", "status", "summary", "findings", "tests_required"}
 )
@@ -354,28 +337,13 @@ def _validate_resume_report_contract(
             raise RunStateError(f"{label} field types are invalid")
         return
     if name.startswith("cursor-") and name.endswith(".json"):
-        unknown = set(data) - _CURSOR_AGENT_RESULT_KEYS
-        if unknown:
-            raise RunStateError(f"{label} has unknown fields")
-        if not _CURSOR_AGENT_RESULT_REQUIRED.issubset(data):
-            raise RunStateError(f"{label} missing required fields")
-        if (
-            data.get("type") != "result"
-            or not isinstance(data.get("subtype"), str)
-            or not data["subtype"]
-            or type(data.get("is_error")) is not bool
-            or type(data.get("duration_ms")) is not int
-            or data["duration_ms"] < 0
-            or type(data.get("duration_api_ms")) is not int
-            or data["duration_api_ms"] < 0
-            or not isinstance(data.get("result"), str)
-            or not isinstance(data.get("session_id"), str)
-            or not data["session_id"]
-            or not isinstance(data.get("request_id"), str)
-            or not data["request_id"]
-            or not isinstance(data.get("usage"), dict)
-        ):
-            raise RunStateError(f"{label} field types are invalid")
+        # Same production envelope as prepare_review_artifacts / authorize.
+        from .snapshot import SnapshotError, validate_executor_envelope
+
+        try:
+            validate_executor_envelope(data)
+        except SnapshotError as exc:
+            raise RunStateError(f"{label} contract is invalid: {exc}") from exc
         return
     if (
         name.startswith("review-")
@@ -719,6 +687,64 @@ def _review_sha256(path: Path) -> str:
         raise IterationBudgetError("last reviewer report cannot be read") from exc
 
 
+def _require_private_executor_envelope(path: Path, *, label: str) -> dict[str, Any]:
+    """Refuse unless ``path`` is a private production Cursor Agent envelope.
+
+    Uses the shared ``validate_executor_envelope`` contract (same as snapshot /
+    resume). Mode must be exactly ``0600`` (stricter than ``require_private``),
+    plus owner, type, hard link, inode, and JSON checks — all before any
+    iteration-budget mutation.
+    """
+    from .persist import secure_lstat_regular
+    from .snapshot import SnapshotError, validate_executor_envelope
+
+    try:
+        info = path.lstat()
+    except FileNotFoundError as exc:
+        raise IterationBudgetError("last executor report is missing or empty") from exc
+    except OSError as exc:
+        raise IterationBudgetError(f"{label} cannot be inspected: {exc}") from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise IterationBudgetError(f"{label} must not be a symlink")
+    if not stat.S_ISREG(info.st_mode):
+        raise IterationBudgetError(f"{label} must be a regular file")
+    # Mode/owner/hard-link before empty short-circuit so world-readable empty
+    # files cannot masquerade as a simple absence. Exact 0600 is required —
+    # require_private alone still accepts 0400/0500/0700.
+    try:
+        checked = secure_lstat_regular(path, require_private=True)
+    except PersistError as exc:
+        raise IterationBudgetError(f"{label} is invalid: {exc}") from exc
+    assert checked is not None
+    mode = stat.S_IMODE(checked.st_mode)
+    if mode != 0o600:
+        raise IterationBudgetError(
+            f"{label} is invalid: insecure mode {oct(mode)}; expected 0o600"
+        )
+    if checked.st_size <= 0:
+        raise IterationBudgetError("last executor report is missing or empty")
+    try:
+        data = secure_read_json(
+            path, require_private=True, containment_root=path.parent
+        )
+        # Re-check after open/read so a mode swap to another owner-only mode
+        # cannot sneak past require_private between lstat and parse.
+        after = secure_lstat_regular(path, require_private=True)
+        assert after is not None
+        after_mode = stat.S_IMODE(after.st_mode)
+        if after_mode != 0o600:
+            raise IterationBudgetError(
+                f"{label} is invalid: insecure mode {oct(after_mode)}; "
+                "expected 0o600"
+            )
+    except PersistError as exc:
+        raise IterationBudgetError(f"{label} is invalid: {exc}") from exc
+    try:
+        return validate_executor_envelope(data)
+    except SnapshotError as exc:
+        raise IterationBudgetError(f"{label} contract is invalid: {exc}") from exc
+
+
 def _authorize_iteration_extension_locked(
     run_dir: Path,
     additional_iterations: int,
@@ -819,16 +845,9 @@ def _authorize_iteration_extension_locked(
         raise IterationBudgetError("last reviewer report field types are invalid")
     cursor_report = run_dir / f"cursor-{iteration}.json"
     reviewer_result = run_dir / f"reviewer-{iteration}-result.json"
-    try:
-        cursor_info = cursor_report.lstat()
-    except OSError as exc:
-        raise IterationBudgetError("last executor report is missing or empty") from exc
-    if (
-        stat.S_ISLNK(cursor_info.st_mode)
-        or not stat.S_ISREG(cursor_info.st_mode)
-        or cursor_info.st_size == 0
-    ):
-        raise IterationBudgetError("last executor report is missing or empty")
+    _require_private_executor_envelope(
+        cursor_report, label=f"cursor-{iteration}.json"
+    )
     result = _regular_json(reviewer_result, f"reviewer-{iteration}-result.json")
     if result.get("state") != "completed" or result.get("exit_code") != 0:
         raise IterationBudgetError("last reviewer execution did not complete successfully")

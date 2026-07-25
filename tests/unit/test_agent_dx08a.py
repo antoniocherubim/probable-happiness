@@ -2735,3 +2735,228 @@ def test_prepare_review_artifacts_rejects_malformed_reviewer_and_executor_envelo
         assert seed_manifest.read_bytes() == before[MANIFEST_FILENAME]
         assert seed_summary.read_bytes() == before[SUMMARY_FILENAME]
         assert executor.read_bytes() == before[executor.name]
+
+
+def _seed_resume_lock(run_dir: Path) -> Path:
+    """Establish the authorize concurrency fence before a refusal probe.
+
+    ``authorize_iteration_extension`` always takes ``.resume.lock``. Seeding it
+    first lets refusal tests prove full run-directory byte-for-byte invariance
+    (including the lock entry) without weakening that fence.
+    """
+    lock_path = run_dir / ".resume.lock"
+    if not lock_path.exists():
+        lock_path.write_bytes(b"")
+        os.chmod(lock_path, 0o600)
+    assert lock_path.is_file()
+    assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
+    return lock_path
+
+
+def _authorize_critical_fingerprint(run_dir: Path) -> dict[str, object]:
+    """Complete run-directory snapshot for authorize refusal invariance.
+
+    Includes lock entries. Callers must seed ``.resume.lock`` first so the
+    concurrency protocol does not add a new directory entry on refusal.
+    """
+    from dx.runstate import ITERATION_BUDGET
+
+    entries: dict[str, object] = {}
+    for path in sorted(run_dir.iterdir()):
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            entries[path.name] = {
+                "kind": "symlink",
+                "mode": stat.S_IMODE(info.st_mode),
+                "target": os.readlink(path),
+            }
+        elif stat.S_ISREG(info.st_mode):
+            entries[path.name] = {
+                "kind": "file",
+                "mode": stat.S_IMODE(info.st_mode),
+                "nlink": info.st_nlink,
+                "ino": info.st_ino,
+                "bytes": path.read_bytes(),
+            }
+        else:
+            entries[path.name] = {
+                "kind": "other",
+                "mode": stat.S_IMODE(info.st_mode),
+            }
+    return {
+        "status": read_status(run_dir),
+        "budget_exists": (run_dir / ITERATION_BUDGET).exists(),
+        "names": sorted(entries),
+        "entries": entries,
+    }
+
+
+def _replace_cursor_report(run_dir: Path, *, mode: int = 0o600, raw: bytes | None = None, payload: dict | None = None) -> Path:
+    cursor = run_dir / "cursor-3.json"
+    if cursor.exists() or cursor.is_symlink():
+        cursor.unlink()
+    if raw is not None:
+        cursor.write_bytes(raw)
+    else:
+        assert payload is not None
+        secure_write_json(cursor, payload)
+    os.chmod(cursor, mode)
+    return cursor
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "malformed",
+        "truncated",
+        "synthetic_summary",
+        "unknown_fields",
+        "missing_fields",
+        "invalid_types",
+        "symlink",
+        "hard_link",
+        "owner",
+        "mode_0644",
+        "mode_0666",
+        "mode_0400",
+        "mode_0500",
+        "mode_0700",
+        "empty",
+    ],
+)
+def test_authorize_iteration_refuses_insecure_cursor_report(
+    tmp_path: Path,
+    case: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DX-08A1: insecure cursor-<n>.json must not mutate the run directory."""
+    from test_agent_dx04 import make_exhausted_run
+    from dx.persist import PersistError
+    from dx.runstate import ITERATION_BUDGET, IterationBudgetError, authorize_iteration_extension
+
+    env = make_exhausted_run(tmp_path / case)
+    run_dir = env["run_dir"]
+    cursor = run_dir / "cursor-3.json"
+    decoy = run_dir / "cursor-decoy.json"
+    # Intended precondition: resume lock fence already present so refusal can
+    # prove full directory invariance including lock entries.
+    _seed_resume_lock(run_dir)
+
+    if case == "malformed":
+        _replace_cursor_report(run_dir, raw=b"not json\n")
+    elif case == "truncated":
+        _replace_cursor_report(run_dir, raw=b'{"type": "result", "subtype":')
+    elif case == "synthetic_summary":
+        _replace_cursor_report(run_dir, payload={"summary": "not production"})
+    elif case == "unknown_fields":
+        _replace_cursor_report(
+            run_dir,
+            payload=_cursor_agent_result(extra=True),
+        )
+    elif case == "missing_fields":
+        payload = _cursor_agent_result()
+        del payload["usage"]
+        _replace_cursor_report(run_dir, payload=payload)
+    elif case == "invalid_types":
+        _replace_cursor_report(
+            run_dir,
+            payload=_cursor_agent_result(is_error="nope"),  # type: ignore[arg-type]
+        )
+    elif case == "symlink":
+        secure_write_json(decoy, _cursor_agent_result("decoy"))
+        cursor.unlink()
+        cursor.symlink_to(decoy)
+    elif case == "hard_link":
+        alias = run_dir / "cursor-3.alias"
+        os.link(cursor, alias)
+        assert cursor.lstat().st_nlink > 1
+    elif case == "owner":
+        import dx.persist as persist_mod
+
+        real_check = persist_mod._check_owner_mode
+
+        def _reject_cursor_owner(
+            info: os.stat_result,
+            path: Path,
+            *,
+            require_private: bool,
+            allow_exec: bool,
+            expected_owner: int | None = None,
+        ) -> None:
+            if Path(path).name == "cursor-3.json":
+                raise PersistError(
+                    f"unexpected owner for {path}: uid={os.geteuid() + 1}, "
+                    f"expected={os.geteuid()}"
+                )
+            return real_check(
+                info,
+                path,
+                require_private=require_private,
+                allow_exec=allow_exec,
+                expected_owner=expected_owner,
+            )
+
+        monkeypatch.setattr(persist_mod, "_check_owner_mode", _reject_cursor_owner)
+    elif case == "mode_0644":
+        os.chmod(cursor, 0o644)
+    elif case == "mode_0666":
+        os.chmod(cursor, 0o666)
+    elif case == "mode_0400":
+        # Valid envelope content, but mode is not exactly 0600.
+        _replace_cursor_report(run_dir, payload=_cursor_agent_result(), mode=0o400)
+    elif case == "mode_0500":
+        _replace_cursor_report(run_dir, payload=_cursor_agent_result(), mode=0o500)
+    elif case == "mode_0700":
+        _replace_cursor_report(run_dir, payload=_cursor_agent_result(), mode=0o700)
+    elif case == "empty":
+        _replace_cursor_report(run_dir, raw=b"")
+    else:
+        raise AssertionError(case)
+
+    before = _authorize_critical_fingerprint(run_dir)
+    assert ".resume.lock" in before["names"]
+    with pytest.raises(
+        IterationBudgetError,
+        match=(
+            r"executor report|cursor-3\.json|symlink|hard link|insecure mode|"
+            r"unexpected owner|invalid JSON|missing or empty|contract is invalid|"
+            r"unknown fields|missing required|field types|expected 0o600"
+        ),
+    ):
+        authorize_iteration_extension(run_dir, 3, origin="cli")
+    assert _authorize_critical_fingerprint(run_dir) == before
+    assert not (run_dir / ITERATION_BUDGET).exists()
+    assert read_status(run_dir) == "BLOCKED"
+    if case == "symlink":
+        assert cursor.is_symlink()
+    if case.startswith("mode_"):
+        expected_mode = {
+            "mode_0644": 0o644,
+            "mode_0666": 0o666,
+            "mode_0400": 0o400,
+            "mode_0500": 0o500,
+            "mode_0700": 0o700,
+        }[case]
+        assert stat.S_IMODE(cursor.lstat().st_mode) == expected_mode
+
+
+def test_authorize_iteration_accepts_production_cursor_envelope(
+    tmp_path: Path,
+) -> None:
+    """DX-08A1: a real Cursor Agent envelope still authorizes the extension."""
+    from test_agent_dx04 import make_exhausted_run
+    from dx.runstate import ITERATION_BUDGET, authorize_iteration_extension, load_iteration_budget
+
+    env = make_exhausted_run(tmp_path / "valid-envelope")
+    run_dir = env["run_dir"]
+    _replace_cursor_report(run_dir, payload=_cursor_agent_result("executor iteration 3"))
+    before_names = sorted(p.name for p in run_dir.iterdir())
+    result = authorize_iteration_extension(run_dir, 3, origin="cli")
+    assert result["result"] == "authorized"
+    assert result["previous_limit"] == 3
+    assert result["effective_limit"] == 6
+    budget = load_iteration_budget(run_dir, 3)
+    assert budget["effective_limit"] == 6
+    assert (run_dir / ITERATION_BUDGET).is_file()
+    assert read_status(run_dir) == "CHANGES_REQUESTED"
+    assert set(before_names).issubset({p.name for p in run_dir.iterdir()})

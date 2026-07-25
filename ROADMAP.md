@@ -39,8 +39,11 @@ Commit, integração e push permanecem ações manuais fora do runner estável.
   (implementada; aguardando revisão formal);
 - [ ] DX-08: persistência segura — candidato WIP após review 3; correções
   fatiadas em [DX-08A](docs/tasks/DX-08A.md) (autoridade/locks/I/O; implementada,
-  aguarda revisão) e [DX-08B](docs/tasks/DX-08B.md) (migration/backup/rollback;
-  planejada). Não tratar DX-08/M1 como fechados até ambas + revisão formal;
+  aguarda revisão), [DX-08A1](docs/tasks/DX-08A1.md) (envelope Cursor privado na
+  extensão de iterações; implementada, aguarda revisão), [DX-08A2](docs/tasks/DX-08A2.md)
+  (status/heartbeat em diretório seguro; planejada) e
+  [DX-08B](docs/tasks/DX-08B.md) (migration/backup/rollback; planejada). Não
+  tratar DX-08/M1 como fechados até as fatias + revisão formal;
 - [x] suíte local com testes determinísticos;
 - [x] aprovação local não cria commit, branch ou job de rede.
 
@@ -57,28 +60,24 @@ Commit, integração e push permanecem ações manuais fora do runner estável.
 | M6 | P1 | Operação e documentação para terceiros | M4–M5 |
 | M7 | Gate | Alpha externa, beta pública e release estável | M0–M6 |
 
-Próxima entrega recomendada: **DX-08B** (fechar correções de migration/backup
-do review 3 da DX-08), depois revisão formal de DX-07/DX-08A/DX-08B antes de
-avançar para DX-09 / M2. DX-08A provou localmente que a API pública não promove
-estado crítico sem artefato vinculado com contrato semântico (request
-`technical_status`/`diff_hash`/`callback_token`, decisão/rejeição, cadeia
-completa de iteration-budget, schemas futuros), que replay no estado-destino
-exige binding contrato-válido no disco (ausente/corrupt/future-schema recusam
-sem mutação; `failure.json` válido diferente é first-failure-wins sem
-reescrever), que resume de EXECUTING/REVIEWING aceita o envelope real do
-Cursor Agent `--output-format json` (`type`/`subtype`/`result`/`session_id`/
-`usage`/…) e recusa o fixture sintético `{"summary":…}`, que
-`review-status` e `prepare_review_artifacts` leem reviewer/executor/validation
-com `require_private=True` (0644/0666 recusados sem mutar bytes/modo) e
-validam o contrato completo do reviewer e o envelope do executor antes de
-qualquer publicação derivada (manifest/summary seed permanecem byte-idênticos),
-que task symlinkada e `validation-*-result.json` future-schema falham fechados
-sem republicar artefatos, que reports privados zero-byte, logs/resultados
-symlinkados, findings aninhados malformados e evidence com manifesto inválido +
-fonte nova falham fechados sem resíduo, e que locks recusam nomes reservados,
-symlink intermediário e troca de inode pós-flock também em `cmd_resume_exec` /
-`authorize_iteration_extension` / `_probe_delivery_lock` (445 passed na suíte
-unitária); M1 permanece aberto até DX-08B e revisão formal.
+Próxima entrega recomendada: **DX-08A2** (status/heartbeat em diretório
+canônico privado), depois **DX-08B** (migration/backup/rollback), depois
+revisão formal de DX-07/DX-08A/DX-08A1/DX-08A2/DX-08B antes de avançar para
+DX-09 / M2. DX-08A1 provou localmente que `authorize_iteration_extension`
+aceita somente `cursor-<iteration>.json` com modo **exatamente** `0600`
+(owner esperado, arquivo regular sem symlink/hard link), lido sem seguir
+links e válido pelo mesmo `validate_executor_envelope` de
+`prepare_review_artifacts`/resume — JSON malformado/truncado/vazio, fixture
+`{"summary":…}`, campos extras/ausentes/tipos inválidos, symlink, hard link,
+owner inesperado e modos `0644`/`0666`/`0400`/`0500`/`0700` recusam sem mutar
+budget/status/audit/journal nem o diretório (com `.resume.lock` pré-presente);
+envelope real de `cursor --output-format json` ainda autoriza. DX-08A (base) provou que a API
+pública não promove estado crítico sem artefato vinculado com contrato
+semântico, replay no estado-destino com binding contrato-válido, resume
+EXECUTING/REVIEWING com envelope Cursor real, `review-status`/
+`prepare_review_artifacts` com `require_private=True`, e locks que recusam
+symlink intermediário/inode pós-flock (461 passed na suíte unitária); M1
+permanece aberto até DX-08A2/DX-08B e revisão formal.
 
 ### Tasks preparadas até M2
 
@@ -91,6 +90,8 @@ unitária); M1 permanece aberto até DX-08B e revisão formal.
 | 5 | M1 | [DX-07](docs/tasks/DX-07.md) | implementada; aguarda revisão formal |
 | 6 | M1 | [DX-08](docs/tasks/DX-08.md) | candidata; review 3 abriu DX-08A/DX-08B |
 | 6a | M1 | [DX-08A](docs/tasks/DX-08A.md) | implementada; aguarda revisão formal |
+| 6a1 | M1 | [DX-08A1](docs/tasks/DX-08A1.md) | implementada; envelope Cursor na extensão |
+| 6a2 | M1 | [DX-08A2](docs/tasks/DX-08A2.md) | planejada: status/heartbeat diretório seguro |
 | 6b | M1 | [DX-08B](docs/tasks/DX-08B.md) | planejada: migration/backup/rollback |
 | 7 | M2 | [DX-09](docs/tasks/DX-09.md) | cgroups e limites de recursos/saída |
 | 8 | M2 | [DX-10](docs/tasks/DX-10.md) | segredos por fase, streaming e retenção segura |
@@ -129,7 +130,8 @@ Resultado: toda transição é válida, condicionada, auditável e recuperável 
 queda abrupta.
 
 Tasks: [DX-07](docs/tasks/DX-07.md), [DX-08](docs/tasks/DX-08.md),
-[DX-08A](docs/tasks/DX-08A.md) e [DX-08B](docs/tasks/DX-08B.md).
+[DX-08A](docs/tasks/DX-08A.md), [DX-08A1](docs/tasks/DX-08A1.md),
+[DX-08A2](docs/tasks/DX-08A2.md) e [DX-08B](docs/tasks/DX-08B.md).
 
 ### Trabalho
 
@@ -165,7 +167,7 @@ Tasks: [DX-07](docs/tasks/DX-07.md), [DX-08](docs/tasks/DX-08.md),
   artefato vinculado (provado em DX-08A, incluindo recusa de bypass spoofado,
   mismatch event/status, matriz semântica decision/request e matriz de replay
   no estado-destino com binding ausente/corrupt/future/mismatched; suíte local
-  445 passed);
+  458 passed);
 - fault injection cobre fronteiras da API comum (write completo/short-write/
   fsync/chmod/segundo fsync/replace/link/dir fsync); matriz exaustiva por
   **cada** evento DX-07 ainda é risco residual;
@@ -175,16 +177,18 @@ Tasks: [DX-07](docs/tasks/DX-07.md), [DX-08](docs/tasks/DX-08.md),
   modo 0644/0666 e contratos malformados de reviewer/executor sem republicar
   manifest/summary, task symlinkada e validation result future-schema,
   technical summary, evidence sem publicar blob antes do manifesto, validation
-  logs/results symlinkados, e reap do supervisor em falha de heartbeat/status
-  em DX-08A; migration ainda depende de DX-08B);
+  logs/results symlinkados, reap do supervisor em falha de heartbeat/status
+  em DX-08A, e `authorize_iteration_extension` só com envelope Cursor privado
+  válido em DX-08A1; migration ainda depende de DX-08B);
 - runs das duas versões persistidas anteriores migram ou recusam retomada sem
   mutação (pendente DX-08B);
 - o baseline declara o mesmo UID como fronteira de confiança; se um modo
   hardened for anunciado, ele demonstra que o executor não consegue forjar
   aprovação ou extensão.
 
-M1 permanece **aberto**: DX-07 e DX-08A implementadas com evidência local;
-DX-08B e revisão formal ainda pendentes. Não declarar o marco concluído.
+M1 permanece **aberto**: DX-07, DX-08A e DX-08A1 implementadas com evidência
+local; DX-08A2, DX-08B e revisão formal ainda pendentes. Não declarar o marco
+concluído.
 
 ## M2 — Limitar processos, recursos e exposição de segredos
 
