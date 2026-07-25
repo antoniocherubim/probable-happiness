@@ -1,6 +1,6 @@
 # Roadmap para uso confiável por terceiros
 
-Atualizado em 2026-07-24.
+Atualizado em 2026-07-25.
 
 Estado atual: **pré-alpha**. O fluxo principal funciona e possui boa cobertura
 local, mas ainda não deve ser oferecido como ferramenta confiável para terceiros
@@ -12,12 +12,12 @@ somente depois que cada marco anterior cumprir seus critérios de saída.
 ## Objetivo de produto
 
 Entregar uma ferramenta instalável e atualizável que execute Cursor e Codex em
-worktrees isolados, mantenha aprovação humana vinculada ao snapshot revisado e,
-quando configurado, publique apenas uma branch segura e auditável.
+worktrees isolados e mantenha aprovação humana vinculada ao snapshot revisado.
+Commit, integração e push permanecem ações manuais fora do runner estável.
 
 “Confiável para terceiros” significa:
 
-- nenhuma alteração não revisada pode alcançar o remote pelo fluxo suportado;
+- nenhuma operação Git remota ocorre pelo fluxo suportado;
 - falhas, reinícios e concorrência terminam em sucesso comprovado ou falha fechada;
 - tokens e credenciais não chegam a processos que não precisam deles;
 - instalação, diagnóstico, atualização e remoção são reproduzíveis;
@@ -29,11 +29,13 @@ quando configurado, publique apenas uma branch segura e auditável.
 - [x] DX-01: gate humano autenticado pelo Telegram e vínculo ao hash revisado;
 - [x] AG-01: ferramenta, target e state roots separados;
 - [x] DX-02: perfil por projeto, bootstrap, timeout, heartbeat e retomada;
-- [x] DX-03: resumo técnico, documentação obrigatória e delivery opt-in;
+- [x] DX-03: resumo técnico e documentação obrigatória; o delivery opt-in foi
+  posteriormente removido;
 - [x] DX-04: extensão explícita e auditável do orçamento de iterações;
-- [x] DX-05: aprovação assíncrona e fila `delivery-job.json` (worker foreground);
+- [x] DX-05: experimento de fila/worker preservado no histórico e retirado da
+  superfície estável;
 - [x] suíte local com testes determinísticos;
-- [x] push sem force, sem merge e com confirmação do OID remoto.
+- [x] aprovação local não cria commit, branch ou job de rede.
 
 ## Ordem de entrega
 
@@ -48,51 +50,52 @@ quando configurado, publique apenas uma branch segura e auditável.
 | M6 | P1 | Operação e documentação para terceiros | M4–M5 |
 | M7 | Gate | Alpha externa, beta pública e release estável | M0–M6 |
 
-Próxima entrega recomendada: **DX-06 / M0 — worker Git endurecido e unidades
-systemd**. A DX-05 já removeu Git do callback e enfileira `delivery-job.json`;
-a DX-06 fecha a fronteira operacional (env mínimo, hooks off, unidade
-separada sem token Telegram).
+Próxima entrega recomendada: **DX-06C / M0 — operação local sem push
+automático**. As candidatas DX-06/DX-06B demonstraram que um worker de push
+local exige uma fronteira de credenciais e uma máquina transacional muito
+maiores que o necessário para M0. O produto estável adota menor privilégio:
+aprova e preserva o snapshot; o operador integra e publica manualmente.
 
 ### Tasks preparadas até M2
 
 | Ordem | Marco | Task | Resultado |
 |---|---|---|---|
-| 1 | M0 | [DX-05](docs/tasks/DX-05.md) | aprovação enfileira delivery; bridge não executa Git |
-| 2 | M0 | [DX-06](docs/tasks/DX-06.md) | worker Git endurecido e unidades systemd separadas |
-| 3 | M1 | [DX-07](docs/tasks/DX-07.md) | máquina de estados central e transições condicionais |
-| 4 | M1 | [DX-08](docs/tasks/DX-08.md) | persistência segura, durável e migrável |
-| 5 | M2 | [DX-09](docs/tasks/DX-09.md) | cgroups e limites de recursos/saída |
-| 6 | M2 | [DX-10](docs/tasks/DX-10.md) | segredos por fase, streaming e retenção segura |
+| 1 | M0 | [DX-05](docs/tasks/DX-05.md) | experimento histórico de fila/worker |
+| 2 | M0 | [DX-06](docs/tasks/DX-06.md) | candidata de hardening não aprovada |
+| 3 | M0 | [DX-06B](docs/tasks/DX-06B.md) | experimento de staging/push não aprovado |
+| 4 | M0 | [DX-06C](docs/tasks/DX-06C.md) | remover delivery remoto; aprovação local terminal |
+| 5 | M1 | [DX-07](docs/tasks/DX-07.md) | máquina de estados central e transições condicionais |
+| 6 | M1 | [DX-08](docs/tasks/DX-08.md) | persistência segura, durável e migrável |
+| 7 | M2 | [DX-09](docs/tasks/DX-09.md) | cgroups e limites de recursos/saída |
+| 8 | M2 | [DX-10](docs/tasks/DX-10.md) | segredos por fase, streaming e retenção segura |
 
-## M0 — Separar Telegram de delivery Git
+## M0 — Aprovação local com menor privilégio
 
-Resultado: o processo que conhece o token Telegram nunca executa Git no
-repositório-alvo.
+Resultado: o processo que conhece o token Telegram apenas registra decisões; o
+runner não possui caminho suportado de commit ou push automático.
 
-Tasks: [DX-05](docs/tasks/DX-05.md) e [DX-06](docs/tasks/DX-06.md).
+Tasks: [DX-05](docs/tasks/DX-05.md), [DX-06](docs/tasks/DX-06.md) e
+[DX-06B](docs/tasks/DX-06B.md) como histórico, concluído por
+[DX-06C](docs/tasks/DX-06C.md).
 
 ### Trabalho
 
-- [x] fazer a bridge registrar aprovação e enfileirar um job de delivery durável;
-- [x] responder ao callback imediatamente, sem aguardar rede ou `git push`;
-- [ ] criar worker separado, sem `AGENT_TELEGRAM_BOT_TOKEN`;
-- [ ] usar ambiente Git allowlisted e remover variáveis `AGENT_*`, `GIT_*` não
-  autorizadas, askpass e prompts interativos;
-- [ ] desabilitar hooks no worker com configuração Git explícita;
-- [ ] aplicar timeout a `ls-remote`, criação de commit e push;
-- [ ] conceder ao worker escrita somente no Git common dir e no state root do
-  projeto selecionado;
-- [ ] gerar unidades systemd distintas para bridge e worker;
-- [x] validar remote, branch, decisão, estado e snapshot novamente no worker;
-- [x] manter idempotência quando o commit ou remote OID já existir.
+- [x] responder ao callback imediatamente, sem aguardar Git ou rede;
+- [x] não importar módulos de delivery na bridge;
+- [x] aceitar somente `delivery.mode = "none"`;
+- [x] remover `delivery-worker`, jobs e comandos internos de push;
+- [x] terminar aprovação válida em `HUMAN_APPROVED`;
+- [x] preservar worktree e validar novamente seu hash com `agent-loop verify`;
+- [x] documentar integração, commit e push como ações manuais;
+- [ ] concluir revisão formal da DX-06C.
 
 ### Critérios de saída
 
-- um hook `pre-push` de teste não recebe o token Telegram nem outros segredos;
-- callback continua responsivo quando o remote trava;
-- a unidade endurecida completa delivery sem liberar escrita genérica na home;
-- matar bridge ou worker em qualquer etapa não gera push não aprovado;
-- teste end-to-end executa aprovação e delivery dentro do sandbox systemd real.
+- bridge e aprovação não importam módulos Git/delivery;
+- nenhum profile aceito consegue habilitar push;
+- callback não cria `delivery-job.json`, commit ou branch;
+- `resume` de aprovação apenas verifica o snapshot, sem acesso remoto;
+- documentação e ajuda da CLI não oferecem worker ou entrega automática.
 
 ## M1 — Centralizar estado e tornar persistência recuperável
 
@@ -105,7 +108,7 @@ Tasks: [DX-07](docs/tasks/DX-07.md) e [DX-08](docs/tasks/DX-08.md).
 
 - [ ] definir enum e tabela única de transições permitidas;
 - [ ] trocar escritas diretas de status por compare-and-set sob lock;
-- [ ] exigir estado aprovado válido antes de iniciar ou retomar delivery;
+- [ ] exigir estado aprovado válido antes de qualquer integração futura;
 - [ ] entradas inválidas devem falhar sem sobrescrever o estado anterior;
 - [ ] centralizar leitura segura com `O_NOFOLLOW`, arquivo regular, owner e modo;
 - [ ] usar `umask 077`, diretórios `0700` e arquivos sensíveis `0600`;
@@ -114,13 +117,13 @@ Tasks: [DX-07](docs/tasks/DX-07.md) e [DX-08](docs/tasks/DX-08.md).
 - [ ] escolher e documentar o modelo de ameaça:
   - baseline: processos com o mesmo UID são confiáveis;
   - hardened: worker/bridge em usuários separados e autenticação keyed do ledger;
-- [ ] criar migrations versionadas para run, profile, approval, delivery e ledger;
+- [ ] criar migrations versionadas para run, profile, approval e ledger;
 - [ ] avaliar SQLite/WAL para transações, índices e outbox, mantendo export JSON
   auditável.
 
 ### Critérios de saída
 
-- nenhuma API pública consegue entregar um run `BLOCKED` ou não aprovado;
+- nenhuma API pública consegue promover um run `BLOCKED` ou não aprovado;
 - fault injection cobre cada fronteira entre artefato, status e notificação;
 - qualquer arquivo truncado, symlink, modo/owner incorreto ou schema futuro falha
   fechado e com diagnóstico acionável;
@@ -146,6 +149,8 @@ Tasks: [DX-09](docs/tasks/DX-09.md) e [DX-10](docs/tasks/DX-10.md).
 - [ ] impor limite por arquivo, snapshot e total do diff;
 - [ ] calcular hashes, diffs e blobs por streaming, sem carregar tudo em memória;
 - [ ] separar ambiente requerido por bootstrap, executor e validação;
+- [ ] bloquear rede do executor por fronteira verificável e impedir acesso a
+  credenciais Git/SSH do operador;
 - [ ] suportar credenciais efêmeras e documentar sua rotação;
 - [ ] verificar que nenhum descendente permanece após timeout/cancelamento;
 - [ ] definir política de espaço em disco e retenção de worktrees/runs.
@@ -154,7 +159,7 @@ Tasks: [DX-09](docs/tasks/DX-09.md) e [DX-10](docs/tasks/DX-10.md).
 
 - fork bomb, processo com nova sessão, saída infinita e arquivo gigante são
   contidos em testes;
-- um executor não recebe credenciais exclusivas das validações ou do delivery;
+- um executor não recebe credenciais exclusivas das validações;
 - OOM, disco cheio e timeout deixam run retomável ou terminalmente bloqueado;
 - nenhum arquivo bruto sensível fica legível por outro usuário local.
 
@@ -215,8 +220,8 @@ Resultado: cada mudança prova que não enfraquece os gates de segurança.
 - [ ] criar CI para a matriz suportada;
 - [ ] executar `pytest`, `bash -n`, `git diff --check`, lint e type checking;
 - [ ] medir cobertura, com meta mínima de 90% nos módulos críticos de estado,
-  aprovação, delivery e bridge;
-- [ ] executar testes de integração Git com remotes bare;
+  aprovação e bridge;
+- [ ] executar testes de integração Git local com worktrees;
 - [ ] executar systemd sandbox em ambiente Linux compatível;
 - [ ] adicionar property-based tests para máquina de estados e schemas;
 - [ ] adicionar fault injection em todas as escritas e chamadas externas;
@@ -226,7 +231,7 @@ Resultado: cada mudança prova que não enfraquece os gates de segurança.
 
 ### Critérios de saída
 
-- CI reproduz os 122 testes atuais e os novos cenários em ambiente limpo;
+- CI reproduz toda a suíte versionada e os novos cenários em ambiente limpo;
 - cada bug de segurança recebe teste de regressão;
 - nenhuma mudança de schema entra sem migration e teste de upgrade;
 - release é criada somente a partir de commit aprovado por todos os gates.
@@ -242,9 +247,9 @@ recuperar a ferramenta com segurança.
 - [ ] criar `SECURITY.md`, política de divulgação e versões com suporte;
 - [ ] criar `CONTRIBUTING.md`, código de conduta e template de issues;
 - [ ] manter `CHANGELOG.md` e notas de upgrade/rollback;
-- [ ] publicar quickstart do primeiro run até aprovação e delivery;
+- [ ] publicar quickstart do primeiro run até aprovação e integração manual;
 - [ ] documentar threat model, trust boundaries e diferenças baseline/hardened;
-- [ ] criar runbook para timeout, corrupção, remote indisponível e disco cheio;
+- [ ] criar runbook para timeout, corrupção, drift e disco cheio;
 - [ ] fornecer repositório-exemplo mínimo sem credenciais reais;
 - [ ] documentar backup, retenção, limpeza e recuperação do state root;
 - [ ] documentar claramente que Telegram não é terminal remoto;

@@ -20,7 +20,8 @@ O plano canônico, com dependências e critérios de saída, está em
 
 - empacotar uma distribuição instalável com entrypoint no `PATH`;
 - versionar migrações do schema de `.agent-loop/project.toml` e de runs antigos;
-- separar delivery em worker sem credencial Telegram e com ambiente Git mínimo;
+- manter integração Git manual no M0 e reavaliar delivery automático somente
+  com isolamento real de credenciais em marco posterior;
 - persistir/rotacionar offsets do Telegram para reduzir replays após restart;
 - impor singleton/claim durável para o outbox da ponte;
 - adicionar cotas de processo, memória, disco e saída por fase;
@@ -32,3 +33,17 @@ O plano canônico, com dependências e critérios de saída, está em
 Um repositório Git contendo apenas sua task versionada pode usar o runner por
 um comando externo. Scripts, schema, testes e estado permanecem fora do
 repositório-alvo.
+
+## Remoção do push automático (DX-06C)
+
+Profiles novos aceitam somente ausência de `[delivery]` ou:
+
+```toml
+[delivery]
+mode = "none"
+```
+
+Remova `push_branch`, remote, templates e `push_after_human_approval`. A
+aprovação termina em `HUMAN_APPROVED`; execute `agent-loop verify` e faça
+commit/push manualmente. Runs antigos de delivery permanecem legíveis, mas esta
+versão não cria nem retoma `delivery-job.json`.

@@ -17,7 +17,6 @@ from .approval import (
     truncate_message,
 )
 from .config import BridgeConfig
-from .delivery_job import callback_delivery_message, ensure_delivery_job
 from .telegram import TelegramClient, TelegramError
 
 logger = logging.getLogger("agent_dx.bridge")
@@ -110,7 +109,7 @@ class Bridge:
                     "inline_keyboard": [
                         [
                             {
-                                "text": "Aprovar e publicar branch",
+                                "text": "Aprovar alterações",
                                 "callback_data": token[:64],
                             },
                             {
@@ -227,7 +226,7 @@ class Bridge:
                 allowed_chat_id=self.config.allowed_chat_id,
             )
             if result == "rejected":
-                answer("Rejeitado. Nenhuma branch foi publicada.")
+                answer("Rejeitado. Nenhuma alteração foi integrada.")
             elif result == "rejected_unauthorized":
                 answer(NEUTRAL_UNAUTHORIZED)
             else:
@@ -244,12 +243,7 @@ class Bridge:
         )
 
         if result in {"accepted", "idempotent_replay"}:
-            # Ensure job under approval semantics; never call Git from the bridge.
-            try:
-                ensure_delivery_job(run_dir)
-            except Exception as exc:
-                logger.warning("delivery job ensure failed for %s: %s", run_dir.name, exc)
-            answer(callback_delivery_message(run_dir))
+            answer("Aprovado. Snapshot local preservado; integração e push são manuais.")
             return
         if result == "rejected_unauthorized":
             answer(NEUTRAL_UNAUTHORIZED)
