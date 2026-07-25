@@ -40,6 +40,13 @@ Cada task possui um único objetivo. O orçamento normal é uma iteração, com 
 máximo uma iteração corretiva quando o finding pertencer diretamente ao objetivo.
 Finding adjacente vira backlog; não expande a task em execução.
 
+O procedimento autônomo por SSH está em
+[Handoff remoto do Personal Stable](REMOTE_HANDOFF.md).
+
+Durante este marco, a documentação obrigatória de cada review é este documento
+e a task atual. O roadmap para terceiros permanece histórico/opcional e não deve
+ser alterado por microtasks pessoais.
+
 ## Fora do marco pessoal
 
 - proteção contra adulteração deliberada pelo mesmo UID;

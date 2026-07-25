@@ -1,5 +1,8 @@
 # Operação pessoal por SSH
 
+Para encadear as tasks sem acesso à conversa original, use o
+[handoff remoto](REMOTE_HANDOFF.md).
+
 ## Pré-requisitos
 
 - computador ligado, conectado à rede e sem suspensão;
