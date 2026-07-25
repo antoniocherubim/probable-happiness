@@ -3,6 +3,10 @@
 Runner externo para executar uma task com Cursor Agent, revisar o resultado com
 Codex e exigir aprovação humana auditável pelo Telegram.
 
+O marco atual é o [Personal Stable v0.1](docs/PERSONAL_STABLE.md), voltado a uso
+pessoal robusto. Para manter e controlar o loop após desconectar o terminal,
+consulte [Operação pessoal por SSH](docs/SSH_OPERATIONS.md).
+
 Projetos consumidores podem declarar bootstrap, ambiente allowlisted, timeouts,
 heartbeat, validações e documentação obrigatória em
 `.agent-loop/project.toml`. Runs interrompidos
