@@ -192,7 +192,7 @@ CLI explícita:
 ```
 
 Não há botão Telegram nesta versão. Isso evita autorização parcial sem o mesmo
-protocolo de `.resume.lock`, ledger e recuperação idempotente da CLI.
+protocolo de `.resume.lock`, estado atômico e idempotência da CLI.
 
 Interrupções `INT`, `TERM` e `HUP` marcam runs ativos como `BLOCKED`, enviam
 notificação best-effort e preservam o worktree. O outbox usa identificador por
@@ -206,7 +206,7 @@ APPROVED → AWAITING_HUMAN_APPROVAL
 
 CHANGES_REQUESTED em N = limite
   → BLOCKED/max_review_iterations
-  → autorização atômica em iteration-budget.json
+  → autorização atômica em state.json.iteration_budget
   → CHANGES_REQUESTED
   → executor em N+1 com o review-N.json
   → validações → reviewer → gate humano normal ou novo limite

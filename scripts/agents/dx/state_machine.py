@@ -216,6 +216,10 @@ def read_state_document(run_dir: Path | str) -> dict[str, object] | None:
         raise StateTransitionError("run state metadata must be an object")
     if "failure" in document:
         _validate_failure(document["failure"])
+    if "iteration_budget" in document and not isinstance(
+        document["iteration_budget"], dict
+    ):
+        raise StateTransitionError("run iteration budget must be an object")
     return document
 
 
@@ -289,6 +293,43 @@ def record_run_failure(
             event=RunEvent.RUN_BLOCKED,
             previous=current,
             current=RunState.BLOCKED,
+            result="applied",
+        )
+
+
+def record_iteration_budget_extension(
+    run_dir: Path | str,
+    budget: dict[str, object],
+    *,
+    expected_budget: dict[str, object] | None,
+    expected_failure: dict[str, object],
+) -> TransitionResult:
+    """Publish an authorized budget and its status transition in one write."""
+    run_path = Path(run_dir)
+    with run_scoped_lock(run_path, lock_name=STATE_LOCK_FILENAME):
+        document = read_state_document(run_path)
+        current = _coerce_state(document.get("status")) if document else None
+        if current != RunState.BLOCKED:
+            raise StateTransitionError(
+                "iteration budget authorization lost BLOCKED state"
+            )
+        assert document is not None
+        if document.get("failure") != expected_failure:
+            raise StateTransitionError(
+                "iteration budget authorization lost failure binding"
+            )
+        if document.get("iteration_budget") != expected_budget:
+            raise StateTransitionError(
+                "iteration budget changed during authorization"
+            )
+        updated = dict(document)
+        updated["iteration_budget"] = budget
+        updated["status"] = RunState.CHANGES_REQUESTED.value
+        atomic_write_json(run_path / STATE_FILENAME, updated)
+        return TransitionResult(
+            event=RunEvent.ITERATION_BUDGET_EXTENDED,
+            previous=current,
+            current=RunState.CHANGES_REQUESTED,
             result="applied",
         )
 

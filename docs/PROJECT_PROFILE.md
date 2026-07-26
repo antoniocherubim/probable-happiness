@@ -125,7 +125,7 @@ valida metadados, task no base commit, `HEAD`, repositório comum do worktree,
 perfil congelado e hash pré-revisão. Drift durante/depois da revisão ou no gate
 humano é recusado. Um `APPROVED` isolado sempre volta a uma nova revisão.
 
-### Ledger de orçamento
+### Orçamento de iterações
 
 `--additional-iterations` aceita de 1 a 20 e nunca altera o limite original em
 `state.json`; o limite efetivo acumulado não pode ultrapassar 50. A autorização
@@ -140,15 +140,15 @@ exige simultaneamente:
   `review-N-snapshot.json`;
 - ausência de artefatos de aprovação e locks concorrentes.
 
-`iteration-budget.json` contém `schema_version`, `run_id`, limites original e
-efetivo e uma cadeia de extensões. Cada item registra incremento, limites
-anterior/novo, origem `cli`, timestamp, iteração, hashes do feedback/snapshot e
-um `idempotency_id` determinístico. Escrita é atômica sob `.resume.lock`. Uma
-queda depois do ledger e antes do status é reconhecida pelo próximo `resume`;
-repetições enquanto a extensão está ativa não somam orçamento.
+O campo `iteration_budget` de `state.json` contém `schema_version`, `run_id`,
+limites original e efetivo e uma cadeia de extensões. Cada item registra
+incremento, limites anterior/novo, origem `cli`, timestamp, iteração, hashes do
+feedback/snapshot e um `idempotency_id` determinístico. Orçamento e status são
+publicados juntos sob `.resume.lock` e `.state.lock`; repetições enquanto a
+extensão está ativa não somam orçamento.
 
 O feedback autorizado permanece no mesmo `review-N.json`; o executor seguinte
-começa em `N+1`. Alterar o ledger, feedback ou snapshot rompe os bindings e
+começa em `N+1`. Alterar o orçamento, feedback ou snapshot rompe os bindings e
 impede a retomada quando a alteração atinge os campos vinculados. Os timestamps
 `authorized_at`/`updated_at` não participam do identificador determinístico, e
 os hashes não autenticam um adversário com o mesmo usuário capaz de reescrever
