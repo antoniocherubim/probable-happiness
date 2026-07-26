@@ -87,10 +87,11 @@ usuários locais e inspecione/remova esses arquivos após uma interrupção anor
 
 Cada fase inicia uma nova sessão/grupo. No timeout, o supervisor envia `SIGTERM`
 ao grupo, aguarda `policy.terminate_grace_seconds` e usa `SIGKILL` se necessário.
-O worktree permanece; `failure.json` registra `executor_timeout`,
-`reviewer_timeout`, `*_empty_report` etc., e o status fica `BLOCKED`. Saída vazia
-nunca é sucesso. O isolamento é por grupo de processos, não por cgroup: um
-descendente deliberado que crie outra sessão pode escapar desse encerramento.
+O worktree permanece; o campo `failure` de `state.json` registra
+`executor_timeout`, `reviewer_timeout`, `*_empty_report` etc., e o status fica
+`BLOCKED`. Saída vazia nunca é sucesso. O isolamento é por grupo de processos,
+não por cgroup: um descendente deliberado que crie outra sessão pode escapar
+desse encerramento.
 
 Durante a fase, `heartbeat.json` é substituído atomicamente e uma linha segura
 mostra fase, iteração, elapsed, PID/PGID, última atividade, arquivos modificados
@@ -130,8 +131,9 @@ humano é recusado. Um `APPROVED` isolado sempre volta a uma nova revisão.
 `state.json`; o limite efetivo acumulado não pode ultrapassar 50. A autorização
 exige simultaneamente:
 
-- status `BLOCKED` e `failure.json.reason = "max_review_iterations"` (o legado
-  seguro `"max_iterations"` é reconhecido para runs anteriores);
+- status `BLOCKED` e
+  `state.json.failure.reason = "max_review_iterations"` (o legado seguro
+  `"max_iterations"` é reconhecido para runs anteriores);
 - cursor igual ao limite efetivo e último `review-N.json` em
   `CHANGES_REQUESTED`;
 - resultado do reviewer concluído, executor report presente e worktree igual ao

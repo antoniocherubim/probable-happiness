@@ -318,7 +318,13 @@ def effective_iteration_limit(run_dir: Path, original_limit: int) -> int:
 
 
 def _failure_reason(run_dir: Path) -> tuple[str, dict[str, Any]]:
-    failure = _regular_json(run_dir / "failure.json", "failure.json")
+    try:
+        state = read_state_document(run_dir)
+    except StateTransitionError as exc:
+        raise IterationBudgetError(f"run failure is invalid: {exc}") from exc
+    failure = state.get("failure") if state else None
+    if not isinstance(failure, dict):
+        raise IterationBudgetError("run failure is missing")
     if set(failure) != {
         "schema_version",
         "reason",
@@ -327,17 +333,17 @@ def _failure_reason(run_dir: Path) -> tuple[str, dict[str, Any]]:
         "report",
         "recorded_at",
     } or failure.get("schema_version") != 1:
-        raise IterationBudgetError("failure.json contract is invalid")
+        raise IterationBudgetError("run failure contract is invalid")
     if (
         type(failure.get("iteration")) is not int
         or not isinstance(failure.get("recorded_at"), str)
         or failure.get("report") is not None
         and not isinstance(failure.get("report"), str)
     ):
-        raise IterationBudgetError("failure.json field types are invalid")
+        raise IterationBudgetError("run failure field types are invalid")
     reason = failure.get("reason")
     if not isinstance(reason, str) or not reason:
-        raise IterationBudgetError("failure.json has no structured reason")
+        raise IterationBudgetError("run failure has no structured reason")
     return reason, failure
 
 

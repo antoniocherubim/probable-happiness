@@ -110,7 +110,9 @@ orçamento normal é uma iteração de implementação e uma corretiva.
 | PC-00 | contrato pessoal e reviewer limitado ao escopo — concluída |
 | PC-01A | remoção completa do vocabulário de delivery — concluída |
 | PC-01B1 | `state.json` para metadata e status — concluída |
-| PC-01B2 | failure, decisão e orçamento dentro do estado |
+| PC-01B2a | failure dentro do estado — concluída |
+| PC-01B2b | orçamento dentro do estado |
+| PC-01B2c | decisão humana dentro do estado |
 | PC-02 | supervisor systemd e limites essenciais |
 | PC-03 | Telegram opcional, resume e E2E real |
 

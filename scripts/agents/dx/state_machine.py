@@ -17,6 +17,14 @@ from .atomic import atomic_write_json, run_scoped_lock
 STATE_FILENAME = "state.json"
 STATE_LOCK_FILENAME = ".state.lock"
 _MAX_STATE_BYTES = 1024 * 1024
+_FAILURE_FIELDS = {
+    "schema_version",
+    "reason",
+    "phase",
+    "iteration",
+    "report",
+    "recorded_at",
+}
 
 
 class RunState(str, Enum):
@@ -145,6 +153,23 @@ def _coerce_state(value: RunState | str | None) -> RunState | None:
         raise StateTransitionError(f"unknown run status: {value!r}") from exc
 
 
+def _validate_failure(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != _FAILURE_FIELDS:
+        raise StateTransitionError("run failure contract is invalid")
+    if (
+        value.get("schema_version") != 1
+        or not isinstance(value.get("reason"), str)
+        or not value["reason"]
+        or not isinstance(value.get("phase"), str)
+        or type(value.get("iteration")) is not int
+        or value.get("report") is not None
+        and not isinstance(value.get("report"), str)
+        or not isinstance(value.get("recorded_at"), str)
+    ):
+        raise StateTransitionError("run failure field types are invalid")
+    return value
+
+
 def read_state_document(run_dir: Path | str) -> dict[str, object] | None:
     """Read and validate the authoritative state without following symlinks."""
     run_path = Path(run_dir)
@@ -189,6 +214,8 @@ def read_state_document(run_dir: Path | str) -> dict[str, object] | None:
     metadata = document.get("metadata", {})
     if not isinstance(metadata, dict):
         raise StateTransitionError("run state metadata must be an object")
+    if "failure" in document:
+        _validate_failure(document["failure"])
     return document
 
 
@@ -222,6 +249,48 @@ def read_state(run_dir: Path | str) -> RunState | None:
 def read_status(run_dir: Path | str) -> str:
     state = read_state(run_dir)
     return state.value if state is not None else ""
+
+
+def record_run_failure(
+    run_dir: Path | str,
+    failure: dict[str, object],
+) -> TransitionResult:
+    """Publish the first structured failure and BLOCKED status in one write."""
+    run_path = Path(run_dir)
+    _validate_failure(failure)
+    with run_scoped_lock(run_path, lock_name=STATE_LOCK_FILENAME):
+        document = read_state_document(run_path)
+        current = _coerce_state(document.get("status")) if document else None
+        if current == RunState.BLOCKED and document and "failure" in document:
+            return TransitionResult(
+                event=RunEvent.RUN_BLOCKED,
+                previous=current,
+                current=current,
+                result="already_applied",
+            )
+        spec = TRANSITIONS[RunEvent.RUN_BLOCKED]
+        if current != RunState.BLOCKED and current not in spec.sources:
+            raise StateTransitionError(
+                f"event {RunEvent.RUN_BLOCKED.value} cannot transition "
+                f"{current.value if current else '<empty>'} to {spec.target.value}"
+            )
+        updated: dict[str, object] = dict(
+            document
+            or {
+                "schema_version": 1,
+                "run_id": run_path.name,
+                "metadata": {},
+            }
+        )
+        updated["status"] = RunState.BLOCKED.value
+        updated["failure"] = failure
+        atomic_write_json(run_path / STATE_FILENAME, updated)
+        return TransitionResult(
+            event=RunEvent.RUN_BLOCKED,
+            previous=current,
+            current=RunState.BLOCKED,
+            result="applied",
+        )
 
 
 def transition_run(

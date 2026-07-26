@@ -22,7 +22,7 @@ from .approval import (
 )
 from .bridge import Bridge, build_awaiting_summary, build_blocked_summary
 from .config import ConfigError, human_approval_timeout_sec, load_bridge_config
-from .atomic import atomic_write_json, run_scoped_lock
+from .atomic import atomic_write_json
 from .paths import (
     PathConfigError,
     default_state_root,
@@ -56,7 +56,6 @@ from .snapshot import (
     validate_documentation,
 )
 from .state_machine import (
-    STATE_LOCK_FILENAME,
     RunEvent,
     StateTransitionError,
     transition_run,
@@ -591,31 +590,21 @@ def cmd_current_status(args: argparse.Namespace) -> int:
 
 def cmd_record_failure(args: argparse.Namespace) -> int:
     from .approval import utc_now_iso
+    from .state_machine import record_run_failure
 
     run_dir = Path(args.run_dir)
-    failure_path = run_dir / "failure.json"
     try:
-        with run_scoped_lock(run_dir, lock_name=STATE_LOCK_FILENAME):
-            result = transition_run(
-                run_dir,
-                RunEvent.RUN_BLOCKED,
-                state_lock_held=True,
-            )
-            # A replay must not replace the first structured blocker. If a
-            # prior process crashed after publishing BLOCKED, complete the
-            # missing artifact while still holding the canonical state lock.
-            if result.result == "applied" or not failure_path.exists():
-                atomic_write_json(
-                    failure_path,
-                    {
-                        "schema_version": 1,
-                        "reason": args.reason,
-                        "phase": args.phase,
-                        "iteration": args.iteration,
-                        "report": args.report or None,
-                        "recorded_at": utc_now_iso(),
-                    },
-                )
+        record_run_failure(
+            run_dir,
+            {
+                "schema_version": 1,
+                "reason": args.reason,
+                "phase": args.phase,
+                "iteration": args.iteration,
+                "report": args.report or None,
+                "recorded_at": utc_now_iso(),
+            },
+        )
     except (OSError, StateTransitionError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

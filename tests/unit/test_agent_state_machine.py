@@ -24,6 +24,7 @@ from dx.state_machine import (  # noqa: E402
     initialize_run_state,
     read_state,
     read_state_document,
+    record_run_failure,
     transition_run,
 )
 
@@ -99,6 +100,32 @@ def test_metadata_initialization_refuses_different_replay(tmp_path: Path) -> Non
         initialize_run_state(run_dir, {"repo": "/two"})
 
 
+def test_failure_and_blocked_status_are_published_together_once(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    metadata = {"repo": "/repo"}
+    initialize_run_state(run_dir, metadata)
+    transition_run(run_dir, RunEvent.RUN_STARTED)
+    first = {
+        "schema_version": 1,
+        "reason": "executor_timeout",
+        "phase": "executor",
+        "iteration": 2,
+        "report": "cursor-2.json",
+        "recorded_at": "2026-07-25T00:00:00Z",
+    }
+
+    result = record_run_failure(run_dir, first)
+    replay = record_run_failure(run_dir, {**first, "reason": "replacement"})
+    state = read_state_document(run_dir)
+
+    assert result.result == "applied"
+    assert replay.result == "already_applied"
+    assert state["status"] == RunState.BLOCKED.value
+    assert state["metadata"] == metadata
+    assert state["failure"] == first
+    assert not (run_dir / "failure.json").exists()
+
+
 def test_expected_state_conflict_is_compare_and_set_failure(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     transition_run(run_dir, RunEvent.RUN_STARTED)
@@ -152,6 +179,14 @@ def test_state_reader_fails_closed(tmp_path: Path) -> None:
         lambda run_id: json.dumps(
             {"schema_version": 1, "run_id": run_id, "status": "UNKNOWN"}
         ).encode(),
+        lambda run_id: json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": run_id,
+                "status": "BLOCKED",
+                "failure": {"reason": "incomplete"},
+            }
+        ).encode(),
     )
     for index, build_content in enumerate(cases):
         run_dir = tmp_path / f"invalid-{index}"
@@ -179,3 +214,4 @@ def test_production_has_no_legacy_status_or_run_metadata_paths() -> None:
         assert ' / "status"' not in source, path
         assert '$RUN_DIR/status' not in source, path
         assert '"run.json"' not in source, path
+        assert '"failure.json"' not in source, path

@@ -33,6 +33,7 @@ from dx.state_machine import (  # noqa: E402
     STATE_FILENAME,
     RunEvent,
     read_state_document,
+    record_run_failure,
     transition_run,
 )
 
@@ -115,8 +116,8 @@ def make_exhausted_run(
             "exit_code": 0,
         },
     )
-    atomic_write_json(
-        run_dir / "failure.json",
+    record_run_failure(
+        run_dir,
         {
             "schema_version": 1,
             "reason": reason,
@@ -126,7 +127,6 @@ def make_exhausted_run(
             "recorded_at": "2026-07-23T00:00:00Z",
         },
     )
-    transition_run(run_dir, RunEvent.RUN_BLOCKED)
     return {
         "repo": repo,
         "worktree": worktree,
@@ -436,7 +436,7 @@ def test_changes_requested_blocks_again_at_effective_limit(tmp_path: Path) -> No
     env = make_exhausted_run(tmp_path)
     completed = _run_extended_loop(env, tmp_path, "CHANGES_REQUESTED")
     assert completed.returncode == 1, completed.stdout + completed.stderr
-    failure = json.loads((env["run_dir"] / "failure.json").read_text(encoding="utf-8"))
+    failure = read_state_document(env["run_dir"])["failure"]
     assert failure["reason"] == "max_review_iterations"
     assert failure["iteration"] == 6
     assert failure["report"] == "review-6.json"
