@@ -23,7 +23,6 @@ commands = [
 [documentation]
 required = true
 required_paths = [
-  "docs/PERSONAL_CORE_V2.md",
   "docs/tasks/{task_id}.md",
 ]
 
