@@ -195,6 +195,22 @@ def test_state_reader_fails_closed(tmp_path: Path) -> None:
                 "iteration_budget": [],
             }
         ).encode(),
+        lambda run_id: json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": run_id,
+                "status": "AWAITING_HUMAN_APPROVAL",
+                "human_decision": {
+                    "schema_version": 1,
+                    "decision": "approve",
+                    "run_id": run_id,
+                    "diff_hash": "0" * 64,
+                    "telegram_user_id": 1,
+                    "telegram_chat_id": 1,
+                    "decided_at": "2026-07-25T00:00:00Z",
+                },
+            }
+        ).encode(),
     )
     for index, build_content in enumerate(cases):
         run_dir = tmp_path / f"invalid-{index}"
@@ -224,3 +240,5 @@ def test_production_has_no_legacy_status_or_run_metadata_paths() -> None:
         assert '"run.json"' not in source, path
         assert '"failure.json"' not in source, path
         assert '"iteration-budget.json"' not in source, path
+        assert '"human_approval_decision.json"' not in source, path
+        assert '"human_rejection.json"' not in source, path

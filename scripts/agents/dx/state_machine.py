@@ -48,7 +48,6 @@ class RunEvent(str, Enum):
     HUMAN_REJECTED = "human_rejected"
     ITERATION_BUDGET_EXTENDED = "iteration_budget_extended"
     RUN_BLOCKED = "run_blocked"
-    RECOVER_HUMAN_APPROVED = "recover_human_approved"
 
 
 class StateTransitionError(ValueError):
@@ -128,10 +127,6 @@ TRANSITIONS: dict[RunEvent, TransitionSpec] = {
     RunEvent.RUN_BLOCKED: TransitionSpec(
         _ACTIVE_NONTERMINAL, RunState.BLOCKED
     ),
-    RunEvent.RECOVER_HUMAN_APPROVED: TransitionSpec(
-        frozenset({RunState.AWAITING_HUMAN_APPROVAL}),
-        RunState.HUMAN_APPROVED,
-    ),
 }
 
 
@@ -167,6 +162,28 @@ def _validate_failure(value: object) -> dict[str, object]:
         or not isinstance(value.get("recorded_at"), str)
     ):
         raise StateTransitionError("run failure field types are invalid")
+    return value
+
+
+def _validate_human_decision(
+    run_path: Path,
+    value: object,
+) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise StateTransitionError("human decision must be an object")
+    if (
+        value.get("schema_version") != 1
+        or value.get("decision") not in {"approve", "reject"}
+        or value.get("run_id") != run_path.name
+        or not isinstance(value.get("diff_hash"), str)
+        or not value["diff_hash"]
+        or type(value.get("telegram_user_id")) is not int
+        or value["telegram_user_id"] <= 0
+        or type(value.get("telegram_chat_id")) is not int
+        or value["telegram_chat_id"] <= 0
+        or not isinstance(value.get("decided_at"), str)
+    ):
+        raise StateTransitionError("human decision contract is invalid")
     return value
 
 
@@ -210,7 +227,7 @@ def read_state_document(run_dir: Path | str) -> dict[str, object] | None:
         raise StateTransitionError("run state schema mismatch")
     if document.get("run_id") != run_path.name:
         raise StateTransitionError("run state binding mismatch")
-    _coerce_state(document.get("status"))
+    current = _coerce_state(document.get("status"))
     metadata = document.get("metadata", {})
     if not isinstance(metadata, dict):
         raise StateTransitionError("run state metadata must be an object")
@@ -220,6 +237,17 @@ def read_state_document(run_dir: Path | str) -> dict[str, object] | None:
         document["iteration_budget"], dict
     ):
         raise StateTransitionError("run iteration budget must be an object")
+    if "human_decision" in document:
+        decision = _validate_human_decision(run_path, document["human_decision"])
+        expected = (
+            RunState.HUMAN_APPROVED
+            if decision["decision"] == "approve"
+            else RunState.BLOCKED
+        )
+        if current != expected:
+            raise StateTransitionError(
+                "human decision and run status are inconsistent"
+            )
     return document
 
 
@@ -334,6 +362,55 @@ def record_iteration_budget_extension(
         )
 
 
+def record_human_decision(
+    run_dir: Path | str,
+    decision: dict[str, object],
+) -> TransitionResult:
+    """Publish an authenticated human decision and terminal status together."""
+    run_path = Path(run_dir)
+    _validate_human_decision(run_path, decision)
+    target = (
+        RunState.HUMAN_APPROVED
+        if decision["decision"] == "approve"
+        else RunState.BLOCKED
+    )
+    event = (
+        RunEvent.HUMAN_APPROVED
+        if decision["decision"] == "approve"
+        else RunEvent.HUMAN_REJECTED
+    )
+    with run_scoped_lock(run_path, lock_name=STATE_LOCK_FILENAME):
+        document = read_state_document(run_path)
+        current = _coerce_state(document.get("status")) if document else None
+        if document is None:
+            raise StateTransitionError("run state is missing")
+        existing = document.get("human_decision")
+        if existing is not None:
+            if existing == decision and current == target:
+                return TransitionResult(
+                    event=event,
+                    previous=current,
+                    current=current,
+                    result="already_applied",
+                )
+            raise StateTransitionError("human decision is already recorded")
+        if current != RunState.AWAITING_HUMAN_APPROVAL:
+            raise StateTransitionError(
+                f"human decision cannot transition "
+                f"{current.value if current else '<empty>'} to {target.value}"
+            )
+        updated = dict(document)
+        updated["human_decision"] = decision
+        updated["status"] = target.value
+        atomic_write_json(run_path / STATE_FILENAME, updated)
+        return TransitionResult(
+            event=event,
+            previous=current,
+            current=target,
+            result="applied",
+        )
+
+
 def transition_run(
     run_dir: Path | str,
     event: RunEvent | str,
@@ -375,6 +452,10 @@ def transition_run(
                 previous=current,
                 current=current,
                 result="already_applied",
+            )
+        if document and document.get("human_decision") is not None:
+            raise StateTransitionError(
+                "run with a human decision is terminal"
             )
         if current not in spec.sources:
             raise StateTransitionError(

@@ -471,18 +471,19 @@ def _authorize_iteration_extension_locked(
     current_hash = compute_diff_hash(Path(metadata["worktree"]), str(metadata["base_commit"]))
     if not snapshot_hash or current_hash != snapshot_hash:
         raise IterationBudgetError("worktree drifted from the last reviewed snapshot")
-    approval_present = False
-    for name in (
-        "human_approval_request.json",
-        "human_approval_decision.json",
-        "human_rejection.json",
-    ):
-        try:
-            (run_dir / name).lstat()
-        except FileNotFoundError:
-            continue
-        approval_present = True
-        break
+    state = read_state_document(run_dir)
+    request_present = False
+    try:
+        (run_dir / "human_approval_request.json").lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        request_present = True
+    approval_present = bool(
+        request_present
+        or state
+        and state.get("human_decision") is not None
+    )
     if approval_present:
         raise IterationBudgetError("approval artifacts make this run ineligible")
     new_limit = effective_limit + additional_iterations
@@ -563,6 +564,10 @@ def authorize_iteration_extension(
 def plan_resume(run_dir: Path, *, review_only: bool = False) -> dict[str, Any]:
     run_dir = Path(run_dir).expanduser().resolve()
     metadata = validate_run(run_dir)
+    state = read_state_document(run_dir)
+    human_decision = state.get("human_decision") if state else None
+    if isinstance(human_decision, dict) and human_decision.get("decision") == "reject":
+        raise RunStateError("human-rejected run is terminal and cannot be resumed")
     status = metadata["status"]
     worktree = Path(metadata["worktree"])
     base = str(metadata["base_commit"])

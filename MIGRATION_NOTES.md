@@ -43,7 +43,7 @@ Git manualmente. Runs antigos permanecem disponíveis somente na branch
 
 ## Máquina de estados central (DX-07)
 
-O arquivo `status` não deve mais ser editado por scripts ou integrações. O
-runner usa eventos tipados, compare-and-set e `.state.lock`; o comando interno
-arbitrário `set-status` foi removido. A PC-01B substituirá esse arquivo pelo
-`state.json` único.
+O arquivo `status` não é usado pelo Personal Core v2. O runner usa eventos
+tipados, compare-and-set e `.state.lock`; metadata, status, failure, orçamento e
+decisão humana ficam no `state.json` único. O comando interno arbitrário
+`set-status` foi removido.
