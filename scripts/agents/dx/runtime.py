@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import signal
 import subprocess
 import threading
@@ -15,6 +14,11 @@ from typing import IO, Mapping, Sequence
 
 from .atomic import atomic_write_bytes, atomic_write_json, atomic_write_text
 from .profile import ProjectProfile, sanitize_text
+from .systemd_scope import (
+    scope_unit_basename,
+    start_scoped_popen,
+    stop_user_scope,
+)
 
 
 TIMEOUT_EXIT = 124
@@ -69,21 +73,23 @@ def _copy_stream(source: IO[bytes], destination: IO[bytes], activity: _Activity)
         source.close()
 
 
-def _terminate_group(process: subprocess.Popen[bytes], grace_seconds: int) -> None:
+def _reap_scope(
+    basename: str,
+    process: subprocess.Popen[bytes],
+    grace_seconds: int,
+) -> None:
+    """Stop the full cgroup, then reap the systemd-run wrapper."""
+    stop_user_scope(basename, grace_seconds=grace_seconds)
     if process.poll() is not None:
         return
     try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        process.wait(timeout=grace_seconds)
+        process.wait(timeout=max(1, grace_seconds))
         return
     except subprocess.TimeoutExpired:
         pass
     try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
+        process.kill()
+    except OSError:
         return
     try:
         process.wait(timeout=max(1, grace_seconds))
@@ -119,17 +125,20 @@ def supervise_command(
     activity = _Activity(_now(), threading.Lock())
     timed_out = False
     interrupted_signal: int | None = None
+    scope_basename = scope_unit_basename(run_dir.name, phase, iteration)
+    unit_name = f"{scope_basename}.scope"
 
     stdout_handle = raw_stdout.open("wb")
     stderr_handle = raw_stderr.open("wb")
+    process: subprocess.Popen[bytes] | None = None
+    threads: list[threading.Thread] = []
+    previous_handlers: dict[int, object] = {}
     try:
-        process = subprocess.Popen(
-            list(command),
-            cwd=str(cwd),
-            env=dict(environment),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
+        process = start_scoped_popen(
+            command,
+            basename=scope_basename,
+            cwd=cwd,
+            environment=environment,
         )
         assert process.stdout is not None and process.stderr is not None
         threads = [
@@ -147,12 +156,9 @@ def supervise_command(
         for thread in threads:
             thread.start()
 
-        previous_handlers: dict[int, object] = {}
-
         def forward(signum: int, _frame: object) -> None:
             nonlocal interrupted_signal
             interrupted_signal = signum
-            _terminate_group(process, terminate_grace_seconds)
 
         for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             previous_handlers[signum] = signal.signal(signum, forward)
@@ -165,26 +171,24 @@ def supervise_command(
                     break
                 if now - started >= timeout_seconds:
                     timed_out = True
-                    _terminate_group(process, terminate_grace_seconds)
+                    _reap_scope(scope_basename, process, terminate_grace_seconds)
                     break
                 if now >= next_heartbeat:
                     changed = _changed_files(cwd)
                     if changed != previous_changed:
                         activity.touch()
                         previous_changed = changed
-                    try:
-                        from .state_machine import read_status
+                    from .state_machine import read_status
 
-                        run_state = read_status(run_dir)
-                    except OSError:
-                        run_state = ""
+                    run_state = read_status(run_dir)
                     payload = {
                         "schema_version": 1,
                         "phase": phase,
                         "iteration": iteration,
                         "elapsed_seconds": int(now - started),
                         "pid": process.pid,
-                        "process_group": process.pid,
+                        "process_group": None,
+                        "systemd_unit": unit_name,
                         "last_activity_at": activity.get(),
                         "changed_files": changed,
                         "state": run_state or "active",
@@ -194,23 +198,35 @@ def supervise_command(
                     atomic_write_json(heartbeat_path, payload)
                     print(
                         f"[agent-loop] {phase.capitalize()} iteration={iteration} active "
-                        f"elapsed={_elapsed(now - started)} pid={process.pid} pgid={process.pid} "
-                        f"last_activity={activity.get()} changed_files={changed}",
+                        f"elapsed={_elapsed(now - started)} pid={process.pid} "
+                        f"unit={unit_name} last_activity={activity.get()} "
+                        f"changed_files={changed}",
                         flush=True,
                     )
                     next_heartbeat = now + heartbeat_seconds
                 time.sleep(min(0.2, max(0.05, heartbeat_seconds / 5)))
             if process.poll() is None:
-                _terminate_group(process, terminate_grace_seconds)
+                _reap_scope(scope_basename, process, terminate_grace_seconds)
             return_code = process.wait()
         finally:
             for signum, handler in previous_handlers.items():
                 signal.signal(signum, handler)
+    finally:
+        cleanup_error: BaseException | None = None
+        if process is not None:
+            try:
+                _reap_scope(scope_basename, process, terminate_grace_seconds)
+            except BaseException as exc:
+                cleanup_error = exc
         for thread in threads:
             thread.join(timeout=2)
-    finally:
         stdout_handle.close()
         stderr_handle.close()
+        if process is None:
+            raw_stdout.unlink(missing_ok=True)
+            raw_stderr.unlink(missing_ok=True)
+        if cleanup_error is not None:
+            raise cleanup_error
 
     stdout_text = raw_stdout.read_text(encoding="utf-8", errors="replace")
     stderr_text = raw_stderr.read_text(encoding="utf-8", errors="replace")
@@ -256,6 +272,7 @@ def supervise_command(
         "last_activity_at": activity.get(),
         "changed_files": _changed_files(cwd),
         "finished_at": _now(),
+        "systemd_unit": unit_name,
     }
     atomic_write_json(result_path, result)
     atomic_write_json(
@@ -264,6 +281,7 @@ def supervise_command(
             **{key: value for key, value in result.items() if key not in {"reason", "child_exit_code"}},
             "process_state": result["state"],
             "process_group": None,
+            "systemd_unit": unit_name,
             "pid": None,
         },
     )

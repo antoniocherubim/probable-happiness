@@ -113,7 +113,9 @@ orçamento normal é uma iteração de implementação e uma corretiva.
 | PC-01B2a | failure dentro do estado — concluída |
 | PC-01B2b | orçamento dentro do estado — concluída |
 | PC-01B2c | decisão humana dentro do estado — concluída |
-| PC-02 | supervisor systemd e limites essenciais |
+| PC-02a | fases em scope `systemd --user` — concluída |
+| PC-02b | cotas essenciais |
+| PC-02c | gate systemd real |
 | PC-03 | Telegram opcional, resume e E2E real |
 
 ## Critério de conclusão

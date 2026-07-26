@@ -60,6 +60,7 @@ from .state_machine import (
     StateTransitionError,
     transition_run,
 )
+from .systemd_scope import SystemdScopeError
 from .telegram import TelegramClient
 
 
@@ -285,7 +286,7 @@ def _run_profile_command(
             report_path=report,
             sanitize_artifacts=artifacts or (),
         )
-    except (OSError, ProfileError, ValueError) as exc:
+    except (OSError, ProfileError, SystemdScopeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 

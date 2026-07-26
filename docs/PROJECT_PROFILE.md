@@ -83,19 +83,20 @@ por arquivos temporários brutos antes da sanitização; uma morte abrupta do
 supervisor pode deixá-los no run directory. Proteja o state root contra outros
 usuários locais e inspecione/remova esses arquivos após uma interrupção anormal.
 
-## Timeout, grupo de processos e heartbeat
+## Timeout, scope systemd e heartbeat
 
-Cada fase inicia uma nova sessão/grupo. No timeout, o supervisor envia `SIGTERM`
-ao grupo, aguarda `policy.terminate_grace_seconds` e usa `SIGKILL` se necessário.
-O worktree permanece; o campo `failure` de `state.json` registra
+Cada fase exige um scope transitório `systemd --user`. No timeout, o supervisor
+envia `SIGTERM` a todo o cgroup, aguarda
+`policy.terminate_grace_seconds`, usa `SIGKILL` se necessário e confirma que o
+scope ficou inativo. Um descendente que crie outra sessão continua no cgroup. O
+worktree permanece; o campo `failure` de `state.json` registra
 `executor_timeout`, `reviewer_timeout`, `*_empty_report` etc., e o status fica
-`BLOCKED`. Saída vazia nunca é sucesso. O isolamento é por grupo de processos,
-não por cgroup: um descendente deliberado que crie outra sessão pode escapar
-desse encerramento.
+`BLOCKED`. Saída vazia nunca é sucesso. Sem acesso ao manager do usuário, a fase
+é recusada antes de executar o comando.
 
 Durante a fase, `heartbeat.json` é substituído atomicamente e uma linha segura
-mostra fase, iteração, elapsed, PID/PGID, última atividade, arquivos modificados
-e estado. Nenhum conteúdo ou ambiente entra no heartbeat.
+mostra fase, iteração, elapsed, PID, unidade systemd, última atividade, arquivos
+modificados e estado. Nenhum conteúdo ou ambiente entra no heartbeat.
 
 ## Máquina de estados de retomada
 

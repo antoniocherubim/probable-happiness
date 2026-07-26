@@ -220,7 +220,7 @@ worktree e executar conscientemente os comandos Git de integração/publicação
 
 O contrato DX-02 está em [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md), com seu
 registro histórico em [`tasks/DX-02.md`](tasks/DX-02.md), incluindo schema TOML,
-bootstrap, ambiente externo `0600`, timeout por grupo de processos, heartbeat,
+bootstrap, ambiente externo `0600`, timeout por scope `systemd --user`, heartbeat,
 `agent-loop resume` e `agent-loop evidence`. O histórico anterior permanece
 nas branches arquivadas e não integra o runtime v2.
 
