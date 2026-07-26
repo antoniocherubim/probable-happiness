@@ -82,8 +82,7 @@ congela o worktree. Antes de integrar:
 ```
 
 A verificação retorna sucesso somente quando há uma decisão humana válida, o
-status está em `HUMAN_APPROVED`, `DELIVERING`, `DELIVERY_FAILED` ou `PUSHED` e o
-hash atual ainda coincide.
+status está em `HUMAN_APPROVED` e o hash atual ainda coincide.
 
 ## Telegram
 
@@ -162,15 +161,16 @@ liberação de escrita somente para o state root.
 
 ### Limite intencional da unidade
 
-A ponte registra somente a decisão. Ela não importa módulos de delivery, não
-executa Git e não escreve no repositório. O `EnvironmentFile` coloca o token do
+A ponte registra somente a decisão. Ela não executa Git e não escreve no
+repositório. O `EnvironmentFile` coloca o token do
 bot somente nesse processo; não existe worker de push no produto estável.
 
 ## Estados e falhas
 
 Todas as mudanças abaixo passam pela máquina central de eventos sob
-`.state.lock`. Replays idempotentes não reescrevem `status`; uma aresta
-incompatível falha sem mutação. A ordem quando há composição é
+`.state.lock`. Metadata e status ficam no único `state.json`; replays
+idempotentes não reescrevem o arquivo e uma aresta incompatível falha sem
+mutação. A ordem quando há composição é
 `.resume.lock` → `.approval.lock` → `.state.lock`.
 
 - `EXECUTING`: Cursor trabalhando;
@@ -180,8 +180,6 @@ incompatível falha sem mutação. A ordem quando há composição é
 - `AWAITING_HUMAN_APPROVAL`: botão pendente;
 - `HUMAN_APPROVED`: decisão autenticada para o hash revisado; terminal no fluxo
   atual, aguardando integração manual;
-- `DELIVERING`, `DELIVERY_FAILED`, `PUSHED`: estados legados reconhecidos apenas
-  para inspeção/retomada sem rede;
 - `BLOCKED`: falha, interrupção, dependência externa ou limite atingido.
 
 Quando a causa for exclusivamente `max_review_iterations`, a notificação
@@ -194,7 +192,7 @@ CLI explícita:
 ```
 
 Não há botão Telegram nesta versão. Isso evita autorização parcial sem o mesmo
-protocolo de `.resume.lock`, ledger e recuperação idempotente da CLI.
+protocolo de `.resume.lock`, estado atômico e idempotência da CLI.
 
 Interrupções `INT`, `TERM` e `HUP` marcam runs ativos como `BLOCKED`, enviam
 notificação best-effort e preservam o worktree. O outbox usa identificador por
@@ -208,7 +206,7 @@ APPROVED → AWAITING_HUMAN_APPROVAL
 
 CHANGES_REQUESTED em N = limite
   → BLOCKED/max_review_iterations
-  → autorização atômica em iteration-budget.json
+  → autorização atômica em state.json.iteration_budget
   → CHANGES_REQUESTED
   → executor em N+1 com o review-N.json
   → validações → reviewer → gate humano normal ou novo limite
@@ -223,9 +221,8 @@ worktree e executar conscientemente os comandos Git de integração/publicação
 O contrato DX-02 está em [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md), com seu
 registro histórico em [`tasks/DX-02.md`](tasks/DX-02.md), incluindo schema TOML,
 bootstrap, ambiente externo `0600`, timeout por grupo de processos, heartbeat,
-`agent-loop resume` e `agent-loop evidence`. O histórico do delivery removido
-está registrado em [`tasks/DX-03.md`](tasks/DX-03.md),
-[`tasks/DX-05.md`](tasks/DX-05.md) e [`tasks/DX-06B.md`](tasks/DX-06B.md).
+`agent-loop resume` e `agent-loop evidence`. O histórico anterior permanece
+nas branches arquivadas e não integra o runtime v2.
 
 ## Limpeza
 

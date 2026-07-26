@@ -23,6 +23,7 @@ from dx.approval import (  # noqa: E402
     STATUS_HUMAN_APPROVED,
     ApprovalError,
     apply_human_approval,
+    apply_human_rejection,
     compute_diff_hash,
     create_approval_request,
     enqueue_notification,
@@ -33,8 +34,14 @@ from dx.approval import (  # noqa: E402
     verify_reviewed_snapshot,
     wait_for_decision,
 )
-from dx.atomic import exclusive_write_json  # noqa: E402
-from dx.state_machine import RunEvent, transition_run  # noqa: E402
+from dx.atomic import atomic_write_json, exclusive_write_json  # noqa: E402
+from dx.state_machine import (  # noqa: E402
+    STATE_FILENAME,
+    RunEvent,
+    StateTransitionError,
+    read_state_document,
+    transition_run,
+)
 
 _BINDING_KEYS = (
     "task",
@@ -164,19 +171,12 @@ def test_replay_callback_is_idempotent(git_worktree: tuple[Path, str], tmp_path:
     assert read_status(run_dir) == STATUS_HUMAN_APPROVED
 
 
-def test_callback_replay_repairs_status_after_decision_publication_crash(
+def test_callback_publishes_decision_and_status_atomically(
     git_worktree: tuple[Path, str],
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """
-    Crash after exclusive decision publish but before HUMAN_APPROVED status.
-
-    Replay must repair status to HUMAN_APPROVED under the run lock and return
-    idempotent_replay; bridge callers observe the repaired persisted state.
-    """
     worktree, base = git_worktree
-    run_dir = tmp_path / "runs" / "run-crash-pub"
+    run_dir = tmp_path / "runs" / "run-atomic-decision"
     run_dir.mkdir(parents=True)
     _arm_technical_approved(run_dir)
     request = create_approval_request(
@@ -187,36 +187,50 @@ def test_callback_replay_repairs_status_after_decision_publication_crash(
         review_report="review.json",
     )
 
-    original_transition_run = approval_mod.transition_run
-    crash_once = {"armed": True}
-
-    def crash_before_human_approved(
-        target_run_dir: Path,
-        event: RunEvent,
-        **kwargs: object,
-    ) -> object:
-        if event == RunEvent.HUMAN_APPROVED and crash_once["armed"]:
-            crash_once["armed"] = False
-            # Decision artifact must already be the real published file.
-            assert (Path(target_run_dir) / "human_approval_decision.json").is_file()
-            raise RuntimeError("simulated crash after decision publication")
-        return original_transition_run(target_run_dir, event, **kwargs)
-
-    monkeypatch.setattr(approval_mod, "transition_run", crash_before_human_approved)
-
-    with pytest.raises(RuntimeError, match="simulated crash after decision publication"):
-        _approve(run_dir, request, user_id=9)
-
-    assert load_decision(run_dir) is not None
-    validate_decision_matches_request(run_dir)
-    assert read_status(run_dir) == STATUS_AWAITING
-
     result, decision = _approve(run_dir, request, user_id=9)
-    assert result == "idempotent_replay"
+    state = read_state_document(run_dir)
+
+    assert result == "accepted"
+    assert state["status"] == STATUS_HUMAN_APPROVED
+    assert state["human_decision"] == decision
+    assert not (run_dir / "human_approval_decision.json").exists()
     assert decision["run_id"] == request["run_id"]
     assert decision["diff_hash"] == request["diff_hash"]
-    assert read_status(run_dir) == STATUS_HUMAN_APPROVED
     assert validate_decision_matches_request(run_dir) == decision
+
+
+def test_rejection_publishes_decision_and_blocked_status_atomically(
+    git_worktree: tuple[Path, str],
+    tmp_path: Path,
+) -> None:
+    worktree, base = git_worktree
+    run_dir = tmp_path / "runs" / "run-atomic-rejection"
+    run_dir.mkdir(parents=True)
+    _arm_technical_approved(run_dir)
+    request = create_approval_request(
+        run_dir=run_dir,
+        task="docs/tasks/DX-01.md",
+        base_commit=base,
+        worktree=worktree,
+        review_report="review.json",
+    )
+
+    result = apply_human_rejection(
+        run_dir=run_dir,
+        callback_token=request["callback_token"],
+        telegram_user_id=9,
+        telegram_chat_id=9,
+        allowed_user_id=9,
+        allowed_chat_id=9,
+    )
+    state = read_state_document(run_dir)
+
+    assert result == "rejected"
+    assert state["status"] == STATUS_BLOCKED
+    assert state["human_decision"]["decision"] == "reject"
+    assert not (run_dir / "human_rejection.json").exists()
+    with pytest.raises(StateTransitionError, match="human decision is terminal"):
+        transition_run(run_dir, RunEvent.EXECUTOR_STARTED)
 
 
 def test_callback_from_other_run_rejected(git_worktree: tuple[Path, str], tmp_path: Path) -> None:
@@ -310,19 +324,18 @@ def test_post_hash_mutation_during_claim_does_not_alter_approved_hash(
         diff_hash=reviewed,
     )
 
-    original_excl = approval_mod.exclusive_write_json
+    original_record = approval_mod.record_human_decision
     in_publish = threading.Barrier(2)
     mutate_done = threading.Event()
     results: list[str] = []
 
-    def gated_excl(path: Path, payload: dict, mode: int = 0o600) -> bool:
-        if Path(path).name == "human_approval_decision.json":
-            in_publish.wait(timeout=10)
-            assert mutate_done.wait(timeout=10), "mutator did not finish"
-            assert payload["diff_hash"] == reviewed
-        return original_excl(path, payload, mode=mode)
+    def gated_record(target_run_dir: Path, payload: dict) -> object:
+        in_publish.wait(timeout=10)
+        assert mutate_done.wait(timeout=10), "mutator did not finish"
+        assert payload["diff_hash"] == reviewed
+        return original_record(target_run_dir, payload)
 
-    monkeypatch.setattr(approval_mod, "exclusive_write_json", gated_excl)
+    monkeypatch.setattr(approval_mod, "record_human_decision", gated_record)
 
     def claimer() -> None:
         result, decision = _approve(run_dir, request, user_id=21)
@@ -368,16 +381,17 @@ def test_forged_and_incomplete_decisions_do_not_promote(
         "run_id": request["run_id"],
         "diff_hash": request["diff_hash"],
     }
-    (run_dir / "human_approval_decision.json").write_text(
-        json.dumps(minimal) + "\n",
-        encoding="utf-8",
+    clean_state = read_state_document(run_dir)
+    atomic_write_json(
+        run_dir / STATE_FILENAME,
+        {**clean_state, "human_decision": minimal},
     )
     with pytest.raises(ApprovalError):
         validate_decision_matches_request(run_dir)
-    assert wait_for_decision(run_dir, timeout_sec=1, poll_interval=0.2) is False
-    assert read_status(run_dir) == STATUS_AWAITING
+    atomic_write_json(run_dir / STATE_FILENAME, clean_state)
 
-    # Missing token_consumed / telegram fields / wrong schema.
+    # Structurally valid state decision is still refused until the request token
+    # has been consumed.
     incomplete = {
         "schema_version": 1,
         "decision": "approve",
@@ -386,15 +400,20 @@ def test_forged_and_incomplete_decisions_do_not_promote(
         "callback_token": request["callback_token"],
         "telegram_user_id": 9,
         "telegram_chat_id": 9,
+        "decided_at": "2026-07-22T00:00:00Z",
     }
-    (run_dir / "human_approval_decision.json").write_text(
-        json.dumps(incomplete) + "\n",
-        encoding="utf-8",
+    atomic_write_json(
+        run_dir / STATE_FILENAME,
+        {
+            **clean_state,
+            "status": STATUS_HUMAN_APPROVED,
+            "human_decision": incomplete,
+        },
     )
     with pytest.raises(ApprovalError, match="token not consumed"):
         validate_decision_matches_request(run_dir)
     assert wait_for_decision(run_dir, timeout_sec=1, poll_interval=0.2) is False
-    assert read_status(run_dir) == STATUS_AWAITING
+    assert read_status(run_dir) == STATUS_HUMAN_APPROVED
 
     # Wrong callback token even with token_consumed flipped.
     forged = dict(incomplete)
@@ -403,9 +422,13 @@ def test_forged_and_incomplete_decisions_do_not_promote(
     req = json.loads(request_path.read_text(encoding="utf-8"))
     req["token_consumed"] = True
     request_path.write_text(json.dumps(req, indent=2) + "\n", encoding="utf-8")
-    (run_dir / "human_approval_decision.json").write_text(
-        json.dumps(forged) + "\n",
-        encoding="utf-8",
+    atomic_write_json(
+        run_dir / STATE_FILENAME,
+        {
+            **clean_state,
+            "status": STATUS_HUMAN_APPROVED,
+            "human_decision": forged,
+        },
     )
     with pytest.raises(ApprovalError, match="callback_token"):
         validate_decision_matches_request(run_dir)
@@ -574,16 +597,11 @@ def test_wait_approval_at_timeout_boundary_remains_human_approved(
     assert load_decision(run_dir)["decision"] == "approve"
 
 
-def test_wait_success_from_decision_publication_phases(
+def test_wait_success_requires_atomic_human_approval(
     git_worktree: tuple[Path, str],
     tmp_path: Path,
 ) -> None:
-    """
-    Success is derived from the validated decision across publication phases:
-    (1) decision present / status still AWAITING → promote + True
-    (2) fully published HUMAN_APPROVED → True
-    (3) no decision → timeout False without inventing approval
-    """
+    """Wait succeeds only after the atomic decision/status publication."""
     worktree, base = git_worktree
     run_dir = tmp_path / "runs" / "run-phases"
     run_dir.mkdir(parents=True)
@@ -596,30 +614,11 @@ def test_wait_success_from_decision_publication_phases(
         review_report="review.json",
     )
 
-    # Phase: authentic decision published, status not yet terminal human approval.
-    req = load_request(run_dir)
-    req["token_consumed"] = True
-    (run_dir / "human_approval_request.json").write_text(
-        json.dumps(req, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    decision = {
-        "schema_version": 1,
-        "decision": "approve",
-        "run_id": request["run_id"],
-        "diff_hash": request["diff_hash"],
-        "callback_token": request["callback_token"],
-        "telegram_user_id": 31,
-        "telegram_chat_id": 31,
-        "request_created_at": request["created_at"],
-        "decided_at": "2026-07-22T00:00:00Z",
-    }
-    exclusive_write_json(run_dir / "human_approval_decision.json", decision)
-    assert read_status(run_dir) == STATUS_AWAITING
+    assert _approve(run_dir, request, user_id=31)[0] == "accepted"
     assert wait_for_decision(run_dir, timeout_sec=2, poll_interval=0.1) is True
     assert read_status(run_dir) == STATUS_HUMAN_APPROVED
 
-    # Phase: already fully published.
+    # Repeated observation remains stable.
     assert wait_for_decision(run_dir, timeout_sec=1, poll_interval=0.1) is True
     assert read_status(run_dir) == STATUS_HUMAN_APPROVED
 
@@ -657,19 +656,17 @@ def test_wait_timeout_cleanup_serialized_with_claim_publication(
         review_report="review.json",
     )
 
-    original_excl = approval_mod.exclusive_write_json
+    original_record = approval_mod.record_human_decision
     decision_written = threading.Event()
     finish_claim = threading.Event()
 
-    def gated_excl(path: Path, payload: dict, mode: int = 0o600) -> bool:
-        created = original_excl(path, payload, mode=mode)
-        if created and Path(path).name == "human_approval_decision.json":
-            # Still inside run_scoped_lock; pause before status promotion.
-            decision_written.set()
-            assert finish_claim.wait(timeout=10), "finish_claim not signaled"
-        return created
+    def gated_record(target_run_dir: Path, payload: dict) -> object:
+        # Still inside the approval lock; pause before atomic state publication.
+        decision_written.set()
+        assert finish_claim.wait(timeout=10), "finish_claim not signaled"
+        return original_record(target_run_dir, payload)
 
-    monkeypatch.setattr(approval_mod, "exclusive_write_json", gated_excl)
+    monkeypatch.setattr(approval_mod, "record_human_decision", gated_record)
 
     ticks = {"n": 0}
 
@@ -957,19 +954,32 @@ def test_mismatched_recreate_after_human_approved_rejected(
     assert read_status(run_dir) == before_status == STATUS_HUMAN_APPROVED
 
 
-def test_stale_orphan_decision_artifacts_handled_safely(
+def test_orphan_human_decision_cannot_open_new_gate(
     git_worktree: tuple[Path, str],
     tmp_path: Path,
 ) -> None:
     worktree, base = git_worktree
     orphan_dir = tmp_path / "runs" / "run-orphan-decision"
     orphan_dir.mkdir(parents=True)
-    (orphan_dir / "human_approval_decision.json").write_text(
-        json.dumps({"decision": "approve", "run_id": orphan_dir.name}),
-        encoding="utf-8",
-    )
     _arm_technical_approved(orphan_dir)
-    with pytest.raises(ApprovalError, match="orphan decision"):
+    orphan_state = read_state_document(orphan_dir)
+    atomic_write_json(
+        orphan_dir / STATE_FILENAME,
+        {
+            **orphan_state,
+            "status": STATUS_HUMAN_APPROVED,
+            "human_decision": {
+                "schema_version": 1,
+                "decision": "approve",
+                "run_id": orphan_dir.name,
+                "diff_hash": "0" * 64,
+                "telegram_user_id": 1,
+                "telegram_chat_id": 1,
+                "decided_at": "2026-07-22T00:00:00Z",
+            },
+        },
+    )
+    with pytest.raises(ApprovalError, match="HUMAN_APPROVED"):
         create_approval_request(
             run_dir=orphan_dir,
             task="docs/tasks/DX-01.md",
@@ -978,44 +988,7 @@ def test_stale_orphan_decision_artifacts_handled_safely(
             review_report="review.json",
         )
     assert not (orphan_dir / "human_approval_request.json").exists()
-    assert read_status(orphan_dir) == STATUS_APPROVED
-
-    stale_dir = tmp_path / "runs" / "run-stale-decision"
-    stale_dir.mkdir(parents=True)
-    _arm_technical_approved(stale_dir)
-    request = create_approval_request(
-        run_dir=stale_dir,
-        task="docs/tasks/DX-01.md",
-        base_commit=base,
-        worktree=worktree,
-        review_report="review.json",
-        task_id="DX-01",
-    )
-    stale_payload = {
-        "schema_version": 1,
-        "decision": "approve",
-        "run_id": request["run_id"],
-        "diff_hash": "0" * 64,
-        "callback_token": request["callback_token"],
-        "telegram_user_id": 1,
-        "telegram_chat_id": 1,
-    }
-    (stale_dir / "human_approval_decision.json").write_text(
-        json.dumps(stale_payload, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    returned = create_approval_request(
-        run_dir=stale_dir,
-        task="docs/tasks/DX-01.md",
-        base_commit=base,
-        worktree=worktree,
-        review_report="review.json",
-        task_id="DX-01",
-    )
-    assert returned == request
-    assert returned["callback_token"] == request["callback_token"]
-    assert read_status(stale_dir) == STATUS_AWAITING
-    assert load_decision(stale_dir) == stale_payload
+    assert read_status(orphan_dir) == STATUS_HUMAN_APPROVED
 
 
 def test_callback_versus_mismatched_recreate_interleaving(
@@ -1037,21 +1010,19 @@ def test_callback_versus_mismatched_recreate_interleaving(
         task_id="DX-01",
     )
 
-    original_excl = approval_mod.exclusive_write_json
+    original_record = approval_mod.record_human_decision
     decision_published = threading.Event()
     finish_claim = threading.Event()
     recreate_started = threading.Event()
     claim_results: list[str] = []
     recreate_errors: list[BaseException] = []
 
-    def gated_excl(path: Path, payload: dict, mode: int = 0o600) -> bool:
-        created = original_excl(path, payload, mode=mode)
-        if created and Path(path).name == "human_approval_decision.json":
-            decision_published.set()
-            assert finish_claim.wait(timeout=10), "finish_claim not signaled"
-        return created
+    def gated_record(target_run_dir: Path, payload: dict) -> object:
+        decision_published.set()
+        assert finish_claim.wait(timeout=10), "finish_claim not signaled"
+        return original_record(target_run_dir, payload)
 
-    monkeypatch.setattr(approval_mod, "exclusive_write_json", gated_excl)
+    monkeypatch.setattr(approval_mod, "record_human_decision", gated_record)
 
     def claimer() -> None:
         result, _decision = apply_human_approval(
@@ -1278,19 +1249,17 @@ def test_create_callback_notification_race_skips_stale_button(
         task_id="DX-01",
     )
 
-    original_excl = approval_mod.exclusive_write_json
+    original_record = approval_mod.record_human_decision
     decision_published = threading.Event()
     finish_claim = threading.Event()
     notify_results: list[dict | None] = []
 
-    def gated_excl(path: Path, payload: dict, mode: int = 0o600) -> bool:
-        created = original_excl(path, payload, mode=mode)
-        if created and Path(path).name == "human_approval_decision.json":
-            decision_published.set()
-            assert finish_claim.wait(timeout=10), "finish_claim not signaled"
-        return created
+    def gated_record(target_run_dir: Path, payload: dict) -> object:
+        decision_published.set()
+        assert finish_claim.wait(timeout=10), "finish_claim not signaled"
+        return original_record(target_run_dir, payload)
 
-    monkeypatch.setattr(approval_mod, "exclusive_write_json", gated_excl)
+    monkeypatch.setattr(approval_mod, "record_human_decision", gated_record)
 
     def claimer() -> None:
         apply_human_approval(

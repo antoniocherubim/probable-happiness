@@ -15,22 +15,25 @@ from typing import Any
 
 from .atomic import (
     atomic_write_json,
-    exclusive_write_json,
     read_json,
     run_scoped_lock,
 )
-from .state_machine import RunEvent, RunState, read_status, transition_run
+from .state_machine import (
+    RunEvent,
+    RunState,
+    StateTransitionError,
+    read_state_document,
+    read_status,
+    record_human_decision,
+    transition_run,
+)
 
 STATUS_APPROVED = RunState.APPROVED.value
 STATUS_AWAITING = RunState.AWAITING_HUMAN_APPROVAL.value
 STATUS_HUMAN_APPROVED = RunState.HUMAN_APPROVED.value
 STATUS_BLOCKED = RunState.BLOCKED.value
-STATUS_DELIVERING = RunState.DELIVERING.value
-STATUS_PUSHED = RunState.PUSHED.value
-STATUS_DELIVERY_FAILED = RunState.DELIVERY_FAILED.value
 
 REQUEST_FILENAME = "human_approval_request.json"
-DECISION_FILENAME = "human_approval_decision.json"
 NOTIFY_FILENAME = "telegram_notify.json"
 LOCK_FILENAME = ".approval.lock"
 
@@ -264,9 +267,9 @@ def create_approval_request(
             )
 
         # Refuse orphan decisions that would poison a new gate.
-        if (run_dir / DECISION_FILENAME).is_file():
+        if load_decision(run_dir) is not None:
             raise ApprovalError(
-                "orphan decision artifact present without approval request"
+                "orphan human decision present without approval request"
             )
 
         token = secrets.token_hex(TOKEN_BYTES)
@@ -300,14 +303,12 @@ def _awaiting_button_publish_allowed_locked(run_dir: Path) -> dict[str, Any] | N
     request_path = run_dir / REQUEST_FILENAME
     if not request_path.is_file():
         return None
-    if (run_dir / DECISION_FILENAME).is_file():
+    if load_decision(run_dir) is not None:
         try:
             validate_decision_matches_request(run_dir)
         except ApprovalError:
             pass
         else:
-            if read_status(run_dir) == STATUS_AWAITING:
-                transition_run(run_dir, RunEvent.RECOVER_HUMAN_APPROVED)
             return None
     try:
         return read_json(request_path)
@@ -335,7 +336,7 @@ def enqueue_notification(
     ``BLOCKED``).
     """
     run_dir = Path(run_dir)
-    if kind not in {"awaiting_human_approval", "blocked", "failure", "pushed", "delivery_failed"}:
+    if kind not in {"awaiting_human_approval", "blocked", "failure"}:
         raise ApprovalError(f"unsupported notify kind: {kind}")
 
     if kind == "awaiting_human_approval":
@@ -394,10 +395,16 @@ def load_request(run_dir: Path) -> dict[str, Any]:
 
 
 def load_decision(run_dir: Path) -> dict[str, Any] | None:
-    path = Path(run_dir) / DECISION_FILENAME
-    if not path.is_file():
+    try:
+        state = read_state_document(run_dir)
+    except StateTransitionError as exc:
+        raise ApprovalError(f"corrupt run state: {exc}") from exc
+    if state is None or "human_decision" not in state:
         return None
-    return read_json(path)
+    decision = state["human_decision"]
+    if not isinstance(decision, dict):
+        raise ApprovalError("human decision is not an object")
+    return decision
 
 
 def find_run_dir_by_token(runs_root: Path, token: str) -> Path | None:
@@ -450,7 +457,7 @@ def _validate_decision_binding(
     *,
     callback_token: str | None = None,
 ) -> None:
-    """Reject incomplete, forged, or unbound decision artifacts."""
+    """Reject incomplete, forged, or unbound decision state."""
     if request.get("schema_version") != SCHEMA_VERSION:
         raise ApprovalError("request schema_version mismatch")
     if decision.get("schema_version") != SCHEMA_VERSION:
@@ -482,20 +489,11 @@ def _idempotent_replay_locked(
     """
     Return idempotent_replay under the held run-scoped lock.
 
-    If a fully valid decision was published but status never reached
-    HUMAN_APPROVED (crash between exclusive decision publish and status
-    write), repair status while still holding the lock so bridge/waiters
-    observe the repaired persisted state.
+    Decision and status share one atomic state publication, so a valid replay
+    must already observe ``HUMAN_APPROVED``.
     """
     current = read_status(run_dir)
-    if current == STATUS_AWAITING:
-        transition_run(run_dir, RunEvent.RECOVER_HUMAN_APPROVED)
-    elif current not in {
-        STATUS_HUMAN_APPROVED,
-        STATUS_DELIVERING,
-        STATUS_PUSHED,
-        STATUS_DELIVERY_FAILED,
-    }:
+    if current != STATUS_HUMAN_APPROVED:
         raise ApprovalError(
             f"valid decision cannot recover incompatible status {current!r}"
         )
@@ -560,16 +558,15 @@ def _claim_human_approval_locked(
         "request_created_at": request.get("created_at"),
         "decided_at": utc_now_iso(),
     }
-    decision_path = run_dir / DECISION_FILENAME
-    # Exclusive publish is the one-use claim; losers see a stable idempotent replay.
-    if not exclusive_write_json(decision_path, decision):
-        request = read_json(request_path)
+    try:
+        record_human_decision(run_dir, decision)
+    except StateTransitionError:
         existing = load_decision(run_dir)
-        if existing is not None and _decision_matches_request(existing, request, callback_token):
+        if existing is not None and _decision_matches_request(
+            existing, request, callback_token
+        ):
             return _idempotent_replay_locked(run_dir, existing)
         return "rejected_wrong_state", existing or {}
-
-    transition_run(run_dir, RunEvent.HUMAN_APPROVED)
     return "accepted", decision
 
 
@@ -585,8 +582,8 @@ def apply_human_approval(
     """
     Record an authenticated human approval bound to run_id + reviewed diff_hash.
 
-    Callback claiming is serialized with a run-scoped flock and an exclusive
-    decision-file publish so concurrent replays yield exactly one ``accepted``.
+    Callback claiming is serialized with a run-scoped flock; state and decision
+    are published together so concurrent replays yield one ``accepted``.
     The decision approves the content-addressed reviewed snapshot hash stored in
     the request — not a claim that the mutable worktree cannot change.
 
@@ -637,13 +634,8 @@ def verify_reviewed_snapshot(run_dir: Path) -> dict[str, Any]:
     """
     run_dir = Path(run_dir)
     request = load_request(run_dir)
-    if read_status(run_dir) not in {
-        STATUS_HUMAN_APPROVED,
-        STATUS_DELIVERING,
-        STATUS_PUSHED,
-        STATUS_DELIVERY_FAILED,
-    }:
-        raise ApprovalError("run is not HUMAN_APPROVED or in a valid approved delivery state")
+    if read_status(run_dir) != STATUS_HUMAN_APPROVED:
+        raise ApprovalError("run is not HUMAN_APPROVED")
     decision = load_decision(run_dir)
     if decision is None:
         raise ApprovalError("human approval decision missing")
@@ -676,26 +668,16 @@ def _decision_ready_locked(run_dir: Path) -> bool:
     Return True when a validated approve decision is present.
 
     Must be called while holding the run-scoped lock. Success is derived only
-    from the decision artifact (never from a bare status string).
+    from the decision field (never from a bare status string).
     """
-    if not (run_dir / DECISION_FILENAME).is_file():
-        return False
     try:
-        validate_decision_matches_request(run_dir)
+        decision = validate_decision_matches_request(run_dir)
     except ApprovalError:
         return False
-    current = read_status(run_dir)
-    if current == STATUS_AWAITING:
-        transition_run(run_dir, RunEvent.RECOVER_HUMAN_APPROVED)
-        return True
-    if current not in {
-        STATUS_HUMAN_APPROVED,
-        STATUS_DELIVERING,
-        STATUS_PUSHED,
-        STATUS_DELIVERY_FAILED,
-    }:
+    if decision.get("decision") != "approve":
         return False
-    return True
+    current = read_status(run_dir)
+    return current == STATUS_HUMAN_APPROVED
 
 
 def wait_for_decision(run_dir: Path, timeout_sec: int, poll_interval: float = 1.0) -> bool:
@@ -806,21 +788,24 @@ def apply_human_rejection(
         if read_status(run_dir) != STATUS_AWAITING or not request_path.is_file():
             return "rejected_wrong_state"
         request = read_json(request_path)
-        if request.get("callback_token") != callback_token or request.get("token_consumed"):
+        if request.get("callback_token") != callback_token:
             return "rejected_token"
-        request["token_consumed"] = True
-        atomic_write_json(request_path, request)
-        atomic_write_json(
-            run_dir / "human_rejection.json",
-            {
-                "schema_version": SCHEMA_VERSION,
-                "decision": "reject",
-                "run_id": request.get("run_id"),
-                "diff_hash": request.get("diff_hash"),
-                "telegram_user_id": telegram_user_id,
-                "telegram_chat_id": telegram_chat_id,
-                "decided_at": utc_now_iso(),
-            },
-        )
-        transition_run(run_dir, RunEvent.HUMAN_REJECTED)
+        if not request.get("token_consumed"):
+            request["token_consumed"] = True
+            atomic_write_json(request_path, request)
+        try:
+            record_human_decision(
+                run_dir,
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "decision": "reject",
+                    "run_id": request.get("run_id"),
+                    "diff_hash": request.get("diff_hash"),
+                    "telegram_user_id": telegram_user_id,
+                    "telegram_chat_id": telegram_chat_id,
+                    "decided_at": utc_now_iso(),
+                },
+            )
+        except StateTransitionError:
+            return "rejected_wrong_state"
         return "rejected"

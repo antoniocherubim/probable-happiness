@@ -33,10 +33,6 @@ required_paths = [
   "docs/tasks/{task_id}.md",
 ]
 
-# Opcional. O único modo suportado termina em HUMAN_APPROVED sem commit/push.
-[delivery]
-mode = "none"
-
 [policy]
 missing_profile = "deny"
 terminate_grace_seconds = 5

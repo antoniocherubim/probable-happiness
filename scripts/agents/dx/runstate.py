@@ -20,13 +20,18 @@ from .approval import (
 )
 from .atomic import atomic_write_json, read_json, run_scoped_lock
 from .profile import ProfileError, load_project_profile
-from .state_machine import RunEvent, transition_run
+from .state_machine import (
+    StateTransitionError,
+    initialize_run_state,
+    record_iteration_budget_extension,
+    read_state_document,
+)
 
 
-RUN_METADATA = "run.json"
+RUN_METADATA = "state.json"
 EVIDENCE_MANIFEST = "evidence.json"
 MAX_EVIDENCE_BYTES = 1024 * 1024
-ITERATION_BUDGET = "iteration-budget.json"
+ITERATION_BUDGET_FIELD = "iteration_budget"
 ITERATION_BUDGET_SCHEMA_VERSION = 1
 MAX_ADDITIONAL_ITERATIONS = 20
 MAX_EFFECTIVE_ITERATIONS = 50
@@ -47,20 +52,23 @@ def write_run_metadata(run_dir: Path, payload: dict[str, Any]) -> dict[str, Any]
     missing = required - set(payload)
     if missing:
         raise RunStateError(f"run metadata missing: {', '.join(sorted(missing))}")
-    document = {"schema_version": 1, "run_id": Path(run_dir).name, **payload}
-    atomic_write_json(Path(run_dir) / RUN_METADATA, document)
-    return document
+    try:
+        initialize_run_state(Path(run_dir), payload)
+    except StateTransitionError as exc:
+        raise RunStateError(str(exc)) from exc
+    return {"schema_version": 1, "run_id": Path(run_dir).name, **payload}
 
 
 def load_run_metadata(run_dir: Path) -> dict[str, Any]:
-    path = Path(run_dir) / RUN_METADATA
     try:
-        data = read_json(path)
-    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        state = read_state_document(run_dir)
+    except (OSError, StateTransitionError) as exc:
         raise RunStateError(f"invalid run metadata: {exc}") from exc
-    if data.get("schema_version") != 1 or data.get("run_id") != Path(run_dir).name:
-        raise RunStateError("run metadata binding mismatch")
-    return data
+    if state is None or not state.get("metadata"):
+        raise RunStateError("run metadata is missing")
+    metadata = state["metadata"]
+    assert isinstance(metadata, dict)
+    return {"schema_version": 1, "run_id": state["run_id"], **metadata}
 
 
 def _git_output(*args: str) -> str:
@@ -210,10 +218,12 @@ def _extension_id(run_id: str, entry: dict[str, Any]) -> str:
 
 def load_iteration_budget(run_dir: Path, original_limit: int) -> dict[str, Any]:
     """Load and strictly validate the append-only logical budget chain."""
-    path = Path(run_dir) / ITERATION_BUDGET
     try:
-        path.lstat()
-    except FileNotFoundError:
+        state = read_state_document(run_dir)
+    except StateTransitionError as exc:
+        raise IterationBudgetError(f"iteration budget state is invalid: {exc}") from exc
+    document = state.get(ITERATION_BUDGET_FIELD) if state else None
+    if document is None:
         return {
             "schema_version": ITERATION_BUDGET_SCHEMA_VERSION,
             "run_id": Path(run_dir).name,
@@ -222,7 +232,8 @@ def load_iteration_budget(run_dir: Path, original_limit: int) -> dict[str, Any]:
             "extensions": [],
             "updated_at": None,
         }
-    document = _regular_json(path, ITERATION_BUDGET)
+    if not isinstance(document, dict):
+        raise IterationBudgetError("iteration budget must be an object")
     required = {
         "schema_version",
         "run_id",
@@ -309,7 +320,13 @@ def effective_iteration_limit(run_dir: Path, original_limit: int) -> int:
 
 
 def _failure_reason(run_dir: Path) -> tuple[str, dict[str, Any]]:
-    failure = _regular_json(run_dir / "failure.json", "failure.json")
+    try:
+        state = read_state_document(run_dir)
+    except StateTransitionError as exc:
+        raise IterationBudgetError(f"run failure is invalid: {exc}") from exc
+    failure = state.get("failure") if state else None
+    if not isinstance(failure, dict):
+        raise IterationBudgetError("run failure is missing")
     if set(failure) != {
         "schema_version",
         "reason",
@@ -318,32 +335,18 @@ def _failure_reason(run_dir: Path) -> tuple[str, dict[str, Any]]:
         "report",
         "recorded_at",
     } or failure.get("schema_version") != 1:
-        raise IterationBudgetError("failure.json contract is invalid")
+        raise IterationBudgetError("run failure contract is invalid")
     if (
         type(failure.get("iteration")) is not int
         or not isinstance(failure.get("recorded_at"), str)
         or failure.get("report") is not None
         and not isinstance(failure.get("report"), str)
     ):
-        raise IterationBudgetError("failure.json field types are invalid")
+        raise IterationBudgetError("run failure field types are invalid")
     reason = failure.get("reason")
     if not isinstance(reason, str) or not reason:
-        raise IterationBudgetError("failure.json has no structured reason")
+        raise IterationBudgetError("run failure has no structured reason")
     return reason, failure
-
-
-def _probe_delivery_lock(run_dir: Path) -> None:
-    path = run_dir / ".delivery.lock"
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise IterationBudgetError("delivery lock is not a regular file")
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (BlockingIOError, OSError) as exc:
-        raise IterationBudgetError("a delivery operation is currently active") from exc
-    finally:
-        if "fd" in locals():
-            os.close(fd)
 
 
 def _review_sha256(path: Path) -> str:
@@ -388,9 +391,6 @@ def _authorize_iteration_extension_locked(
         "APPROVED",
         "AWAITING_HUMAN_APPROVAL",
         "HUMAN_APPROVED",
-        "DELIVERING",
-        "PUSHED",
-        "DELIVERY_FAILED",
     }
     if status in terminal:
         raise IterationBudgetError(
@@ -408,14 +408,6 @@ def _authorize_iteration_extension_locked(
         and status in {"BLOCKED", "CHANGES_REQUESTED", "EXECUTING", "REVIEWING"}
     ):
         # Replay of the currently active authorization after any interruption.
-        if status == "BLOCKED" and iteration == int(latest["authorized_at_iteration"]):
-            reason, _failure = _failure_reason(run_dir)
-            if reason in {MAX_REVIEW_REASON, LEGACY_MAX_REVIEW_REASON}:
-                try:
-                    transition_run(run_dir, RunEvent.ITERATION_BUDGET_EXTENDED)
-                except (OSError, ValueError):
-                    # plan_resume also recognizes this pending-ledger state.
-                    pass
         return {
             "result": "idempotent_replay",
             "idempotency_id": latest["idempotency_id"],
@@ -479,22 +471,21 @@ def _authorize_iteration_extension_locked(
     current_hash = compute_diff_hash(Path(metadata["worktree"]), str(metadata["base_commit"]))
     if not snapshot_hash or current_hash != snapshot_hash:
         raise IterationBudgetError("worktree drifted from the last reviewed snapshot")
-    approval_or_delivery_present = False
-    for name in (
-        "human_approval_request.json",
-        "human_approval_decision.json",
-        "human_rejection.json",
-        "delivery.json",
-    ):
-        try:
-            (run_dir / name).lstat()
-        except FileNotFoundError:
-            continue
-        approval_or_delivery_present = True
-        break
-    if approval_or_delivery_present:
-        raise IterationBudgetError("approval or delivery artifacts make this run ineligible")
-    _probe_delivery_lock(run_dir)
+    state = read_state_document(run_dir)
+    request_present = False
+    try:
+        (run_dir / "human_approval_request.json").lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        request_present = True
+    approval_present = bool(
+        request_present
+        or state
+        and state.get("human_decision") is not None
+    )
+    if approval_present:
+        raise IterationBudgetError("approval artifacts make this run ineligible")
     new_limit = effective_limit + additional_iterations
     if new_limit > MAX_EFFECTIVE_ITERATIONS:
         raise IterationBudgetError(
@@ -522,14 +513,15 @@ def _authorize_iteration_extension_locked(
         "extensions": [*extensions, entry],
         "updated_at": utc_now_iso(),
     }
-    atomic_write_json(run_dir / ITERATION_BUDGET, document)
-    # If interrupted after the atomic ledger write, plan_resume recognizes the
-    # pending authorization. This status change makes the normal path explicit.
-    status_transition = "completed"
     try:
-        transition_run(run_dir, RunEvent.ITERATION_BUDGET_EXTENDED)
-    except (OSError, ValueError):
-        status_transition = "pending_recovery"
+        record_iteration_budget_extension(
+            run_dir,
+            document,
+            expected_budget=budget if extensions else None,
+            expected_failure=failure,
+        )
+    except StateTransitionError as exc:
+        raise IterationBudgetError(str(exc)) from exc
     return {
         "result": "authorized",
         "idempotency_id": entry["idempotency_id"],
@@ -537,7 +529,7 @@ def _authorize_iteration_extension_locked(
         "previous_limit": effective_limit,
         "effective_limit": new_limit,
         "iteration": iteration,
-        "status_transition": status_transition,
+        "status_transition": "completed",
     }
 
 
@@ -572,6 +564,10 @@ def authorize_iteration_extension(
 def plan_resume(run_dir: Path, *, review_only: bool = False) -> dict[str, Any]:
     run_dir = Path(run_dir).expanduser().resolve()
     metadata = validate_run(run_dir)
+    state = read_state_document(run_dir)
+    human_decision = state.get("human_decision") if state else None
+    if isinstance(human_decision, dict) and human_decision.get("decision") == "reject":
+        raise RunStateError("human-rejected run is terminal and cannot be resumed")
     status = metadata["status"]
     worktree = Path(metadata["worktree"])
     base = str(metadata["base_commit"])
@@ -585,15 +581,7 @@ def plan_resume(run_dir: Path, *, review_only: bool = False) -> dict[str, Any]:
     if iteration < 1 or iteration > effective_limit:
         raise RunStateError("invalid iteration in run")
 
-    if status in {
-        "HUMAN_APPROVED",
-        "DELIVERING",
-        "DELIVERY_FAILED",
-        "PUSHED",
-    }:
-        # DELIVERING/DELIVERY_FAILED/PUSHED are retained only so runs created by
-        # older releases remain inspectable. Current releases never perform or
-        # resume network delivery.
+    if status == "HUMAN_APPROVED":
         validate_decision_matches_request(run_dir)
         phase = "complete"
     elif status == "AWAITING_HUMAN_APPROVAL":
@@ -623,23 +611,7 @@ def plan_resume(run_dir: Path, *, review_only: bool = False) -> dict[str, Any]:
         if snapshot and current != snapshot:
             raise RunStateError("worktree changed during or after interrupted review")
         reviewer_result = run_dir / f"reviewer-{iteration}-result.json"
-        latest_extension = budget["extensions"][-1] if budget["extensions"] else None
-        pending_extension = (
-            status == "BLOCKED"
-            and isinstance(latest_extension, dict)
-            and iteration == latest_extension.get("authorized_at_iteration")
-            and effective_limit == latest_extension.get("effective_limit")
-            and iteration < effective_limit
-        )
-        if pending_extension and not review_only:
-            reason, _failure = _failure_reason(run_dir)
-            if reason not in {MAX_REVIEW_REASON, LEGACY_MAX_REVIEW_REASON}:
-                raise RunStateError(
-                    "pending iteration authorization no longer matches the blocker"
-                )
-            phase = "executor"
-            iteration += 1
-        elif review_only:
+        if review_only:
             phase = "reviewer"
         elif snapshot and cursor_report.is_file() and cursor_report.stat().st_size > 0:
             # The pre-review hash binds the snapshot. Whether the reviewer was

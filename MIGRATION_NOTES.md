@@ -34,23 +34,16 @@ Um repositório Git contendo apenas sua task versionada pode usar o runner por
 um comando externo. Scripts, schema, testes e estado permanecem fora do
 repositório-alvo.
 
-## Remoção do push automático (DX-06C)
+## Personal Core v2
 
-Profiles novos aceitam somente ausência de `[delivery]` ou:
-
-```toml
-[delivery]
-mode = "none"
-```
-
-Remova `push_branch`, remote, templates e `push_after_human_approval`. A
-aprovação termina em `HUMAN_APPROVED`; execute `agent-loop verify` e faça
-commit/push manualmente. Runs antigos de delivery permanecem legíveis, mas esta
-versão não cria nem retoma `delivery-job.json`.
+A linha v2 não reconhece `[delivery]`. Remova a tabela inteira. A aprovação
+termina em `HUMAN_APPROVED`; execute `agent-loop verify` e faça a integração
+Git manualmente. Runs antigos permanecem disponíveis somente na branch
+`personal-stable` e não são abertos ou migrados pelo núcleo v2.
 
 ## Máquina de estados central (DX-07)
 
-O arquivo `status` não deve mais ser editado por scripts ou integrações. O
-runner usa eventos tipados, compare-and-set e `.state.lock`; o comando interno
-arbitrário `set-status` foi removido. Runs legados em `DELIVERING`,
-`DELIVERY_FAILED` ou `PUSHED` continuam inspecionáveis, mas são terminais.
+O arquivo `status` não é usado pelo Personal Core v2. O runner usa eventos
+tipados, compare-and-set e `.state.lock`; metadata, status, failure, orçamento e
+decisão humana ficam no `state.json` único. O comando interno arbitrário
+`set-status` foi removido.

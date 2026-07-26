@@ -22,7 +22,7 @@ from .approval import (
 )
 from .bridge import Bridge, build_awaiting_summary, build_blocked_summary
 from .config import ConfigError, human_approval_timeout_sec, load_bridge_config
-from .atomic import atomic_write_json, run_scoped_lock
+from .atomic import atomic_write_json
 from .paths import (
     PathConfigError,
     default_state_root,
@@ -56,7 +56,6 @@ from .snapshot import (
     validate_documentation,
 )
 from .state_machine import (
-    STATE_LOCK_FILENAME,
     RunEvent,
     StateTransitionError,
     transition_run,
@@ -366,7 +365,6 @@ def cmd_init_run(args: argparse.Namespace) -> int:
                 "max_iterations": args.max_iterations,
                 "env_file": str(Path(args.env_file).expanduser().resolve()) if args.env_file else None,
                 "profile": profile.public_dict(),
-                "delivery": {"mode": "none"},
             },
         )
     except (OSError, ProfileError, RunStateError) as exc:
@@ -579,33 +577,34 @@ def cmd_transition_state(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_current_status(args: argparse.Namespace) -> int:
+    from .state_machine import read_status
+
+    try:
+        print(read_status(Path(args.run_dir)))
+    except (OSError, StateTransitionError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_record_failure(args: argparse.Namespace) -> int:
     from .approval import utc_now_iso
+    from .state_machine import record_run_failure
 
     run_dir = Path(args.run_dir)
-    failure_path = run_dir / "failure.json"
     try:
-        with run_scoped_lock(run_dir, lock_name=STATE_LOCK_FILENAME):
-            result = transition_run(
-                run_dir,
-                RunEvent.RUN_BLOCKED,
-                state_lock_held=True,
-            )
-            # A replay must not replace the first structured blocker. If a
-            # prior process crashed after publishing BLOCKED, complete the
-            # missing artifact while still holding the canonical state lock.
-            if result.result == "applied" or not failure_path.exists():
-                atomic_write_json(
-                    failure_path,
-                    {
-                        "schema_version": 1,
-                        "reason": args.reason,
-                        "phase": args.phase,
-                        "iteration": args.iteration,
-                        "report": args.report or None,
-                        "recorded_at": utc_now_iso(),
-                    },
-                )
+        record_run_failure(
+            run_dir,
+            {
+                "schema_version": 1,
+                "reason": args.reason,
+                "phase": args.phase,
+                "iteration": args.iteration,
+                "report": args.report or None,
+                "recorded_at": utc_now_iso(),
+            },
+        )
     except (OSError, StateTransitionError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
@@ -810,6 +809,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[event.value for event in RUNNER_TRANSITION_EVENTS],
     )
     p.set_defaults(func=cmd_transition_state)
+
+    p = sub.add_parser("current-status", help="Read the authoritative run status")
+    p.add_argument("--run-dir", required=True)
+    p.set_defaults(func=cmd_current_status)
 
     p = sub.add_parser("record-failure", help="Atomically block a run with structured reason")
     p.add_argument("--run-dir", required=True)

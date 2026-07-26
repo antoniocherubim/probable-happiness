@@ -282,7 +282,9 @@ def _test_summary(run_dir: Path, executor_report: Path) -> tuple[dict[str, int],
         for number, label in _TEST_COUNT.findall(text):
             normalized = "errors" if label.lower().startswith("error") else label.lower()
             counts[normalized] += int(number)
-    metadata = read_json(run_dir / "run.json")
+    from .runstate import load_run_metadata
+
+    metadata = load_run_metadata(run_dir)
     profile = metadata.get("profile") or {}
     validation = profile.get("validation") if isinstance(profile, dict) else {}
     configured = validation.get("commands") if isinstance(validation, dict) else []

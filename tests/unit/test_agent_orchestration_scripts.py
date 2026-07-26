@@ -30,6 +30,17 @@ def test_agent_scripts_bash_syntax() -> None:
         assert completed.returncode == 0, f"{script.name}: {completed.stderr}"
 
 
+def test_reviewer_prompts_do_not_expand_task_scope() -> None:
+    prompts = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (AGENTS / "run_task.sh", AGENTS / "review_current.sh")
+    )
+    for unrelated in ("Alembic", "PostgreSQL"):
+        assert unrelated not in prompts
+    assert prompts.count("Findings outside the task scope are non-blocking backlog notes") == 2
+    assert prompts.count("unless the task explicitly requires it") == 2
+
+
 def test_run_task_dry_run_smoke() -> None:
     # Prefer a tracked task file present in this checkout.
     task = "docs/tasks/DX-01.md"

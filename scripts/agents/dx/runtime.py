@@ -173,7 +173,9 @@ def supervise_command(
                         activity.touch()
                         previous_changed = changed
                     try:
-                        run_state = (run_dir / "status").read_text(encoding="utf-8").strip()
+                        from .state_machine import read_status
+
+                        run_state = read_status(run_dir)
                     except OSError:
                         run_state = ""
                     payload = {

@@ -18,10 +18,9 @@ AGENTS = REPO_ROOT / "scripts" / "agents"
 sys.path.insert(0, str(AGENTS))
 
 from dx.approval import compute_diff_hash, read_status  # noqa: E402
-from dx.atomic import atomic_write_json, atomic_write_text  # noqa: E402
+from dx.atomic import atomic_write_json  # noqa: E402
 from dx.profile import ProjectProfile  # noqa: E402
 from dx.runstate import (  # noqa: E402
-    ITERATION_BUDGET,
     MAX_ADDITIONAL_ITERATIONS,
     IterationBudgetError,
     authorize_iteration_extension,
@@ -29,7 +28,13 @@ from dx.runstate import (  # noqa: E402
     plan_resume,
     write_run_metadata,
 )
-from dx.state_machine import RunEvent, transition_run  # noqa: E402
+from dx.state_machine import (  # noqa: E402
+    STATE_FILENAME,
+    RunEvent,
+    read_state_document,
+    record_run_failure,
+    transition_run,
+)
 
 
 def git(repo: Path, *args: str) -> str:
@@ -38,6 +43,10 @@ def git(repo: Path, *args: str) -> str:
         text=True,
         stderr=subprocess.STDOUT,
     ).strip()
+
+
+def assert_budget_absent(run_dir: Path) -> None:
+    assert "iteration_budget" not in read_state_document(run_dir)
 
 
 def make_exhausted_run(
@@ -73,7 +82,6 @@ def make_exhausted_run(
             "max_iterations": 3,
             "env_file": None,
             "profile": ProjectProfile().public_dict(),
-            "delivery": {"mode": "none"},
         },
     )
     (run_dir / "iteration").write_text("3\n", encoding="utf-8")
@@ -111,8 +119,8 @@ def make_exhausted_run(
             "exit_code": 0,
         },
     )
-    atomic_write_json(
-        run_dir / "failure.json",
+    record_run_failure(
+        run_dir,
         {
             "schema_version": 1,
             "reason": reason,
@@ -122,7 +130,6 @@ def make_exhausted_run(
             "recorded_at": "2026-07-23T00:00:00Z",
         },
     )
-    transition_run(run_dir, RunEvent.RUN_BLOCKED)
     return {
         "repo": repo,
         "worktree": worktree,
@@ -134,7 +141,7 @@ def make_exhausted_run(
 
 def test_blocked_limit_plus_three_continues_at_iteration_four(tmp_path: Path) -> None:
     env = make_exhausted_run(tmp_path)
-    run_json_before = (env["run_dir"] / "run.json").read_bytes()
+    metadata_before = read_state_document(env["run_dir"])["metadata"]
     result = authorize_iteration_extension(env["run_dir"], 3)
     plan = plan_resume(env["run_dir"])
     budget = load_iteration_budget(env["run_dir"], 3)
@@ -149,29 +156,24 @@ def test_blocked_limit_plus_three_continues_at_iteration_four(tmp_path: Path) ->
     assert budget["effective_limit"] == 6
     assert budget["extensions"][0]["origin"] == "cli"
     assert len(budget["extensions"][0]["idempotency_id"]) == 64
-    assert (env["run_dir"] / "run.json").read_bytes() == run_json_before
+    assert read_state_document(env["run_dir"])["metadata"] == metadata_before
     assert read_status(env["run_dir"]) == "CHANGES_REQUESTED"
 
 
-def test_replay_after_each_interruption_point_never_adds_twice(tmp_path: Path) -> None:
+def test_atomic_authorization_and_replay_never_add_twice(tmp_path: Path) -> None:
     env = make_exhausted_run(tmp_path)
     first = authorize_iteration_extension(env["run_dir"], 3)
 
-    # Crash after ledger but before status.
-    transition_run(env["run_dir"], RunEvent.RUN_BLOCKED)
-    pending_plan = plan_resume(env["run_dir"])
-    assert pending_plan["resume_phase"] == "executor"
-    assert pending_plan["iteration"] == 4
-    second = authorize_iteration_extension(env["run_dir"], 3)
-    assert second["result"] == "idempotent_replay"
-    assert read_status(env["run_dir"]) == "CHANGES_REQUESTED"
+    state = read_state_document(env["run_dir"])
+    assert state["status"] == "CHANGES_REQUESTED"
+    assert state["iteration_budget"]["effective_limit"] == 6
 
-    # Crash before/during iteration 4 executor.
+    # Replay before/during iteration 4 executor.
     (env["run_dir"] / "iteration").write_text("4\n", encoding="utf-8")
     transition_run(env["run_dir"], RunEvent.EXECUTOR_STARTED)
-    third = authorize_iteration_extension(env["run_dir"], 3)
-    assert third["result"] == "idempotent_replay"
-    assert third["idempotency_id"] == first["idempotency_id"]
+    second = authorize_iteration_extension(env["run_dir"], 3)
+    assert second["result"] == "idempotent_replay"
+    assert second["idempotency_id"] == first["idempotency_id"]
     assert len(load_iteration_budget(env["run_dir"], 3)["extensions"]) == 1
 
 
@@ -191,13 +193,9 @@ def test_two_concurrent_authorizations_create_one_extension(tmp_path: Path) -> N
     assert len(load_iteration_budget(env["run_dir"], 3)["extensions"]) == 1
 
 
-@pytest.mark.parametrize("lock_name", [".resume.lock", ".delivery.lock"])
-def test_active_resume_or_delivery_lock_refuses_authorization(
-    tmp_path: Path,
-    lock_name: str,
-) -> None:
+def test_active_resume_lock_refuses_authorization(tmp_path: Path) -> None:
     env = make_exhausted_run(tmp_path)
-    lock_path = env["run_dir"] / lock_name
+    lock_path = env["run_dir"] / ".resume.lock"
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -205,7 +203,7 @@ def test_active_resume_or_delivery_lock_refuses_authorization(
             authorize_iteration_extension(env["run_dir"], 3)
     finally:
         os.close(fd)
-    assert not (env["run_dir"] / ITERATION_BUDGET).exists()
+    assert_budget_absent(env["run_dir"])
 
 
 def test_drift_refuses_extension_without_mutation(tmp_path: Path) -> None:
@@ -224,7 +222,7 @@ def test_drift_refuses_extension_without_mutation(tmp_path: Path) -> None:
         if path.is_file() and not path.name.startswith(".")
     }
     assert after == before
-    assert not (env["run_dir"] / ITERATION_BUDGET).exists()
+    assert_budget_absent(env["run_dir"])
     assert read_status(env["run_dir"]) == "BLOCKED"
 
 
@@ -232,7 +230,7 @@ def test_other_block_reason_is_refused_with_actual_reason(tmp_path: Path) -> Non
     env = make_exhausted_run(tmp_path, reason="validation_failed")
     with pytest.raises(IterationBudgetError, match="validation_failed"):
         authorize_iteration_extension(env["run_dir"], 3)
-    assert not (env["run_dir"] / ITERATION_BUDGET).exists()
+    assert_budget_absent(env["run_dir"])
 
 
 @pytest.mark.parametrize(
@@ -241,22 +239,22 @@ def test_other_block_reason_is_refused_with_actual_reason(tmp_path: Path) -> Non
         "APPROVED",
         "AWAITING_HUMAN_APPROVAL",
         "HUMAN_APPROVED",
-        "DELIVERING",
-        "PUSHED",
-        "DELIVERY_FAILED",
     ],
 )
-def test_approval_and_delivery_states_are_never_extendable(
+def test_approval_states_are_never_extendable(
     tmp_path: Path,
     status: str,
 ) -> None:
     env = make_exhausted_run(tmp_path)
-    # Fixture for active and historical terminal states. A real run cannot
-    # transition out of BLOCKED into any of these states.
-    atomic_write_text(env["run_dir"] / "status", status)
+    state = read_state_document(env["run_dir"])
+    assert state is not None
+    atomic_write_json(
+        env["run_dir"] / STATE_FILENAME,
+        {**state, "status": status},
+    )
     with pytest.raises(IterationBudgetError, match=status):
         authorize_iteration_extension(env["run_dir"], 3)
-    assert not (env["run_dir"] / ITERATION_BUDGET).exists()
+    assert_budget_absent(env["run_dir"])
 
 
 @pytest.mark.parametrize(
@@ -269,17 +267,17 @@ def test_invalid_values_are_refused_without_mutation(tmp_path: Path, value: obje
     with pytest.raises(IterationBudgetError, match="between 1 and"):
         authorize_iteration_extension(env["run_dir"], value)  # type: ignore[arg-type]
     assert read_status(env["run_dir"]) == status_before
-    assert not (env["run_dir"] / ITERATION_BUDGET).exists()
+    assert_budget_absent(env["run_dir"])
 
 
-def test_legacy_reason_is_migratable_and_legacy_run_without_ledger_still_plans(
+def test_legacy_reason_is_accepted_and_run_without_extension_still_plans(
     tmp_path: Path,
 ) -> None:
     env = make_exhausted_run(tmp_path, reason="max_iterations")
     legacy_plan = plan_resume(env["run_dir"], review_only=True)
     assert legacy_plan["resume_phase"] == "reviewer"
     assert legacy_plan["effective_max_iterations"] == 3
-    assert not (env["run_dir"] / ITERATION_BUDGET).exists()
+    assert_budget_absent(env["run_dir"])
 
     authorized = authorize_iteration_extension(env["run_dir"], 3)
     assert authorized["effective_limit"] == 6
@@ -308,7 +306,7 @@ def test_review_only_remains_incompatible_with_budget_authorization(tmp_path: Pa
     )
     assert completed.returncode == 2
     assert "cannot be combined" in completed.stderr
-    assert not (env["run_dir"] / ITERATION_BUDGET).exists()
+    assert_budget_absent(env["run_dir"])
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "abc", str(MAX_ADDITIONAL_ITERATIONS + 1)])
@@ -335,7 +333,7 @@ def test_cli_rejects_invalid_budget_before_opening_resume_lock(
     assert completed.returncode == 2
     assert "no run artifact was changed" in completed.stderr
     assert not (env["run_dir"] / ".resume.lock").exists()
-    assert not (env["run_dir"] / ITERATION_BUDGET).exists()
+    assert_budget_absent(env["run_dir"])
 
 
 def _write_fake_agents(tmp_path: Path, reviewer_status: str) -> tuple[Path, Path]:
@@ -430,14 +428,13 @@ def test_executor_receives_last_feedback_and_approval_reaches_human_gate(
     assert (env["run_dir"] / "human_approval_request.json").is_file()
     assert read_status(env["run_dir"]) == "AWAITING_HUMAN_APPROVAL"
     assert not (env["run_dir"] / "human_approval_decision.json").exists()
-    assert not (env["run_dir"] / "delivery.json").exists()
 
 
 def test_changes_requested_blocks_again_at_effective_limit(tmp_path: Path) -> None:
     env = make_exhausted_run(tmp_path)
     completed = _run_extended_loop(env, tmp_path, "CHANGES_REQUESTED")
     assert completed.returncode == 1, completed.stdout + completed.stderr
-    failure = json.loads((env["run_dir"] / "failure.json").read_text(encoding="utf-8"))
+    failure = read_state_document(env["run_dir"])["failure"]
     assert failure["reason"] == "max_review_iterations"
     assert failure["iteration"] == 6
     assert failure["report"] == "review-6.json"
@@ -454,12 +451,11 @@ def test_changes_requested_blocks_again_at_effective_limit(tmp_path: Path) -> No
     assert notification["offer_approval_button"] is False
 
 
-def test_budget_artifact_tampering_is_detected(tmp_path: Path) -> None:
+def test_budget_state_tampering_is_detected(tmp_path: Path) -> None:
     env = make_exhausted_run(tmp_path)
     authorize_iteration_extension(env["run_dir"], 3)
-    budget_path = env["run_dir"] / ITERATION_BUDGET
-    budget = json.loads(budget_path.read_text(encoding="utf-8"))
-    budget["effective_limit"] = 9
-    budget_path.write_text(json.dumps(budget), encoding="utf-8")
+    state = read_state_document(env["run_dir"])
+    state["iteration_budget"]["effective_limit"] = 9
+    atomic_write_json(env["run_dir"] / STATE_FILENAME, state)
     with pytest.raises(IterationBudgetError, match="effective limit mismatch"):
         plan_resume(env["run_dir"])

@@ -23,7 +23,6 @@ _SAFE_SECTIONS = {
     "validation": {"commands"},
     "instructions": {"executor", "reviewer"},
     "documentation": {"required", "required_paths"},
-    "delivery": {"mode"},
     "policy": {"missing_profile", "terminate_grace_seconds"},
 }
 _DOCUMENTATION_FIELDS = {"task_id", "task_slug"}
@@ -68,7 +67,6 @@ class ProjectProfile:
     reviewer_instructions: tuple[str, ...] = ()
     documentation_required: bool = False
     documentation_paths: tuple[str, ...] = ()
-    delivery_mode: str = "none"
     missing_profile: str = "allow"
     terminate_grace_seconds: int = 5
 
@@ -99,7 +97,6 @@ class ProjectProfile:
                 "required": self.documentation_required,
                 "required_paths": list(self.documentation_paths),
             },
-            "delivery": {"mode": self.delivery_mode},
             "policy": {
                 "missing_profile": self.missing_profile,
                 "terminate_grace_seconds": self.terminate_grace_seconds,
@@ -213,7 +210,6 @@ def load_project_profile(repo: Path | str, *, missing_policy: str = "allow") -> 
     validation = _table(data, "validation")
     instructions = _table(data, "instructions")
     documentation = _table(data, "documentation")
-    delivery = _table(data, "delivery")
     policy = _table(data, "policy")
     configured_missing = policy.get("missing_profile", "allow")
     if configured_missing not in {"allow", "deny"}:
@@ -235,12 +231,6 @@ def load_project_profile(repo: Path | str, *, missing_policy: str = "allow") -> 
             raise ProfileError("documentation path template must remain repository-relative")
     if documentation_required and not documentation_paths:
         raise ProfileError("documentation.required needs at least one required_paths entry")
-    delivery_mode = delivery.get("mode", "none")
-    if delivery_mode != "none":
-        raise ProfileError(
-            "delivery.mode must be 'none'; automatic Git push was removed"
-        )
-
     return ProjectProfile(
         path=path,
         bootstrap_command=_command(bootstrap.get("command"), "bootstrap.command", optional=True),
@@ -267,7 +257,6 @@ def load_project_profile(repo: Path | str, *, missing_policy: str = "allow") -> 
         reviewer_instructions=_string_list(instructions.get("reviewer"), "instructions.reviewer"),
         documentation_required=documentation_required,
         documentation_paths=documentation_paths,
-        delivery_mode=delivery_mode,
         missing_profile=configured_missing,
         terminate_grace_seconds=_bounded_int(
             policy.get("terminate_grace_seconds"),
