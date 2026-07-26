@@ -1,7 +1,8 @@
 # Codex Cursor Agent Loop
 
 Runner externo para executar uma task com Cursor Agent, revisar o resultado com
-Codex e exigir aprovação humana auditável pelo Telegram.
+Codex e preservar um snapshot verificável. A decisão humana pelo Telegram é
+opcional.
 
 O desenvolvimento ativo está sendo reorganizado como
 [Personal Core v2](docs/PERSONAL_CORE_V2.md): um núcleo menor, exclusivamente
@@ -21,14 +22,15 @@ As mudanças de estado passam por uma tabela tipada e compare-and-set sob
 O projeto não busca distribuição para terceiros nesta linha. O roadmap público
 é histórico e não orienta mais as tasks do Personal Core.
 
-O runner não faz commit, push, merge, tag, PR ou deploy. Após a aprovação humana,
-ele preserva o worktree e o hash revisado para integração Git manual. Não existe
-configuração de publicação; uma tabela `[delivery]` é recusada como desconhecida.
+O runner não faz commit, push, merge, tag, PR ou deploy. Após o aceite técnico
+ou humano, ele preserva o worktree e o hash revisado para integração Git manual.
+Não existe configuração de publicação; uma tabela `[delivery]` é recusada como
+desconhecida.
 
-O executor recebe instrução explícita para não fazer commit/push e roda com o
-sandbox da CLI habilitado. Isso ainda não equivale a um isolamento de rede
-provado por namespace/cgroup; repositórios hostis continuam fora do modelo
-suportado até o M2.
+Executor, validações e reviewer recebem `GIT_ALLOW_PROTOCOL=file`; Git recusa
+transportes remotos antes de abrir conexão, inclusive quando chamado por caminho
+absoluto. Isso não é um namespace de rede e não bloqueia clientes HTTP genéricos;
+repositórios deliberadamente hostis permanecem fora do modelo suportado.
 
 ## Preparação
 
@@ -65,10 +67,21 @@ Sem `XDG_STATE_HOME`, usa `~/.local/state`. `--state-root` permite outro local.
 O identificador inclui o caminho canônico do Git, isolando repositórios com o
 mesmo nome e aliases por symlink.
 
-## Gate humano
+## Aprovação opcional
 
-Configure token e IDs numéricos fora do Git conforme
+O perfil escolhe explicitamente:
+
+```toml
+[approval]
+mode = "none"      # termina em APPROVED após review e verificação local
+# mode = "telegram"  # abre o gate humano existente
+```
+
+O default de compatibilidade é `telegram`. Em `none`, nenhum request ou outbox
+Telegram é criado; `verify` aceita o manifesto técnico congelado. Em `telegram`,
+configure token e IDs numéricos fora do Git conforme
 [`docs/AGENT_ORCHESTRATION.md`](docs/AGENT_ORCHESTRATION.md), então execute:
+
 
 ```bash
 ./agent-loop serve
@@ -85,8 +98,8 @@ Antes de integrar manualmente, valide novamente decisão e snapshot:
 ./agent-loop verify --run-dir /caminho/externo/para/o/run
 ```
 
-O comando falha se não houver decisão humana válida ou se o worktree divergir
-do hash revisado.
+O comando falha se o modo configurado não tiver seu aceite válido ou se o
+worktree divergir do hash revisado.
 
 Depois da verificação, inspecione o worktree preservado e execute
 `git add`/`commit`/`push` conscientemente no seu fluxo normal. Esses comandos

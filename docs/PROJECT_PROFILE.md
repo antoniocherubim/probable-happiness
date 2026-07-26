@@ -14,6 +14,7 @@ comando é um array `argv`; nenhum valor passa por `eval` ou shell implícito.
 | Campo | Tipo | Default/restrição |
 |---|---|---|
 | `schema_version` | inteiro | obrigatório, `1` |
+| `approval.mode` | `none` ou `telegram` | `telegram` |
 | `bootstrap.command` | array de strings | opcional |
 | `bootstrap.timeout_seconds` | inteiro | `300`, 1–86400 |
 | `executor.timeout_seconds` | inteiro | `1800`, 1–86400 |
@@ -50,10 +51,12 @@ comportamento, testes e riscos; o reviewer valida a precisão. Ausência bloquei
 o gate humano. O loop não edita documentação por heurística e não exige SHA ou
 URL de uma branch que ainda não existe.
 
-## Aprovação local
+## Aprovação local ou Telegram
 
-Após a decisão humana, o loop termina em `HUMAN_APPROVED` e preserva o
-worktree. Não cria index, commit, branch nem conexão Git remota.
+Com `approval.mode = "none"`, um review técnico válido termina em `APPROVED`,
+sem request/outbox Telegram. Com `telegram`, a decisão termina em
+`HUMAN_APPROVED`. Ambos preservam o worktree e exigem `verify` antes da
+integração manual. Nenhum modo cria index, commit, branch ou conexão Git remota.
 
 Use `agent-loop verify --run-dir ...` imediatamente antes da integração manual.
 Profiles com uma tabela `[delivery]` são recusados; remova a tabela inteira.
@@ -99,6 +102,11 @@ worktree permanece; o campo `failure` de `state.json` registra
 `BLOCKED`. Saída vazia nunca é sucesso. Sem acesso ao manager do usuário, a fase
 é recusada antes de executar o comando.
 
+O ambiente de cada fase também fixa `GIT_ALLOW_PROTOCOL=file` e
+`GIT_PROTOCOL_FROM_USER=0`. Operações locais continuam disponíveis, mas
+transportes Git remotos são recusados antes da rede. Isso não bloqueia outros
+clientes de rede e não amplia o modelo para repositórios hostis.
+
 `MemoryMax` e `TasksMax` são aplicados diretamente ao scope. `prlimit` fixa um
 limite hard de tamanho por arquivo para a árvore de processos. Stdout e stderr
 compartilham o orçamento de `limits.output_bytes`; ao excedê-lo, o scope é
@@ -123,6 +131,7 @@ BLOCKED + --review-only -> nova revisão do snapshot atual
 BLOCKED/max_review_iterations + orçamento explícito -> executor em N+1
 AWAITING_HUMAN_APPROVAL -> apenas retoma wait-decision
 HUMAN_APPROVED          -> valida decisão/hash; não repete gate
+APPROVED + mode=none    -> valida manifesto/hash; não repete review
 ```
 
 ```bash

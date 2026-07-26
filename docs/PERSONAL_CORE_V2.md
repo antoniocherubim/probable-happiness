@@ -1,6 +1,6 @@
 # Personal Core v2
 
-Status: reorganização em andamento; PC-02 concluída.
+Status: Personal Core v2 concluído para uso pessoal.
 
 Esta linha substitui o roadmap de produto público por um runner pequeno para
 uso pessoal. A branch `personal-stable` permanece como referência do protótipo
@@ -37,6 +37,8 @@ Fluxo:
 - o snapshot aprovado é imutável e verificado antes da integração manual;
 - state root, run dirs e artefatos privados usam `0700`/`0600`;
 - segredos são allowlisted por fase e nunca entram em logs.
+- fases supervisionadas aceitam somente o protocolo Git local `file`;
+  transportes Git remotos falham antes de abrir conexão.
 
 ## Modelo de confiança
 
@@ -116,10 +118,15 @@ orçamento normal é uma iteração de implementação e uma corretiva.
 | PC-02a | fases em scope `systemd --user` — concluída |
 | PC-02b | cotas essenciais — concluída |
 | PC-02c | gate systemd real — concluída |
-| PC-03 | Telegram opcional, resume e E2E real |
+| PC-03 | Telegram opcional, resume e E2E real — concluída |
 
 ## Critério de conclusão
 
 Um teste ponta a ponta deve provar: execução, mudança, validação, review,
 aprovação, verificação do hash e interrupção por sinal/timeout/limite sem
 processos sobreviventes. Nenhuma etapa pode acessar uma rede Git.
+
+Gate final: **211 testes passaram**, sem skips. O E2E local provou execução,
+mudança, validação, review, aceite técnico, `verify`, `resume` e recusa de
+transportes Git HTTPS/SSH. Os testes systemd reais provaram limpeza após sucesso,
+erro, sinal, timeout e cotas; nenhum scope do runner permaneceu ativo.

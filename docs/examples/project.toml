@@ -1,5 +1,8 @@
 schema_version = 1
 
+[approval]
+mode = "telegram"
+
 [bootstrap]
 command = ["bash", "scripts/agent-loop/bootstrap.sh"]
 timeout_seconds = 300

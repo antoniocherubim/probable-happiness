@@ -9,8 +9,9 @@ task versionada
   → Codex revisa diff, aceite e testes
   → CHANGES_REQUESTED retorna ao Cursor (orçamento inicial de 1 a 5 ciclos)
   → APPROVED técnico
-  → AWAITING_HUMAN_APPROVAL
-  → HUMAN_APPROVED para o hash revisado
+  ├─ approval.mode=none → verificação local
+  └─ approval.mode=telegram → AWAITING_HUMAN_APPROVAL
+                              → HUMAN_APPROVED para o hash revisado
   → verificação manual antes de integrar
 ```
 
@@ -74,17 +75,24 @@ Antes e depois da revisão, o runner calcula SHA-256 sobre:
 - tipo Git, bit executável e conteúdo de arquivos regulares;
 - bytes do destino de symlinks, sem seguir o link.
 
-Os hashes devem coincidir. `HUMAN_APPROVED` aprova esse hash imutável, mas não
-congela o worktree. Antes de integrar:
+Os hashes devem coincidir. `HUMAN_APPROVED` no modo `telegram` ou o manifesto
+técnico no modo `none` vincula esse hash imutável, mas não congela o worktree.
+Antes de integrar:
 
 ```bash
 ./agent-loop verify --run-dir /state/projects/<repo-id>/runs/<run-id>
 ```
 
-A verificação retorna sucesso somente quando há uma decisão humana válida, o
-status está em `HUMAN_APPROVED` e o hash atual ainda coincide.
+A verificação retorna sucesso quando há decisão humana válida em
+`HUMAN_APPROVED`, ou aceite técnico terminal em `APPROVED` com
+`approval.mode = "none"`, e o hash atual ainda coincide.
 
 ## Telegram
+
+Telegram é opcional. Selecione `[approval] mode = "telegram"` no perfil para
+usar esta seção. Sem a ponte ou durante indisponibilidade de rede, o run
+permanece em `AWAITING_HUMAN_APPROVAL`; `resume` apenas retoma a espera e nunca
+inventa uma decisão.
 
 Crie um arquivo externo, por exemplo
 `~/.config/codex-cursor-agent-loop/telegram.env`, com permissão `0600`:
