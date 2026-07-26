@@ -17,15 +17,13 @@ não confiável até nova revisão. Veja [Perfil e retomada segura](docs/PROJECT
 
 As mudanças de estado passam por uma tabela tipada e compare-and-set sob
 `.state.lock`; eventos inválidos falham sem substituir o estado anterior.
-Estados históricos de delivery são somente leitura e não voltam ao fluxo ativo.
 
 O projeto não busca distribuição para terceiros nesta linha. O roadmap público
 é histórico e não orienta mais as tasks do Personal Core.
 
 O runner não faz commit, push, merge, tag, PR ou deploy. Após a aprovação humana,
-ele preserva o worktree e o hash revisado para integração Git manual. O profile
-aceita somente `delivery.mode = "none"`; configurações antigas de
-`push_branch` falham no preflight.
+ele preserva o worktree e o hash revisado para integração Git manual. Não existe
+configuração de publicação; uma tabela `[delivery]` é recusada como desconhecida.
 
 O executor recebe instrução explícita para não fazer commit/push e roda com o
 sandbox da CLI habilitado. Isso ainda não equivale a um isolamento de rede
@@ -109,7 +107,7 @@ Cada extensão aceita de 1 a 20 iterações; o limite efetivo total é 50. O
 `max_iterations` original em `run.json` não muda. A cadeia auditável fica em
 `iteration-budget.json`, vinculada ao último feedback e hash revisado. Repetir o
 mesmo comando durante a extensão ativa é idempotente. Outras causas de
-`BLOCKED`, drift, estados de aprovação/delivery e combinação com
+`BLOCKED`, drift, estados de aprovação e combinação com
 `--review-only` são recusados sem novo orçamento.
 
 ## systemd --user
@@ -124,8 +122,8 @@ systemd-analyze verify ~/.config/systemd/user/agent-telegram-bridge.service
 
 O comando apenas gera o arquivo; não habilita nem inicia o serviço.
 
-A unidade endurecida libera escrita somente no state root. A bridge não importa
-módulos de delivery, não executa Git e não precisa escrever no repositório.
+A unidade endurecida libera escrita somente no state root. A bridge não
+executa Git e não precisa escrever no repositório.
 
 ## Estrutura
 

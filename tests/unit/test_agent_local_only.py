@@ -1,4 +1,4 @@
-"""Local-only approval, documentation, and removed-delivery regressions."""
+"""Local-only approval and documentation regressions."""
 
 from __future__ import annotations
 
@@ -48,8 +48,6 @@ commands = [["python3", "-m", "pytest", "-q"]]
 required = true
 required_paths = ["docs/release/{task_id}.md"]
 
-[delivery]
-mode = "none"
 """
 
 
@@ -108,7 +106,6 @@ def make_local_run(tmp_path: Path, *, approve: bool = False) -> dict[str, object
             "max_iterations": 3,
             "env_file": None,
             "profile": profile.public_dict(),
-            "delivery": {"mode": "none"},
         },
     )
     (run_dir / "iteration").write_text("1\n", encoding="utf-8")
@@ -143,32 +140,28 @@ def make_local_run(tmp_path: Path, *, approve: bool = False) -> dict[str, object
     }
 
 
-def test_profile_accepts_only_local_delivery(tmp_path: Path) -> None:
+def test_profile_rejects_every_delivery_section(tmp_path: Path) -> None:
     env = make_local_run(tmp_path / "valid")
     profile = env["profile"]
-    assert profile.delivery_mode == "none"
-    assert profile.public_dict()["delivery"] == {"mode": "none"}
+    assert "delivery" not in profile.public_dict()
 
-    for delivery in (
+    for obsolete in (
         '[delivery]\nmode = "push_branch"\n',
+        '[delivery]\nmode = "none"\n',
         '[delivery]\nmode = "none"\nremote = "origin"\n',
-        '[delivery]\nmode = "none"\npush_after_human_approval = true\n',
     ):
-        repo = tmp_path / f"bad-{abs(hash(delivery))}"
+        repo = tmp_path / f"bad-{abs(hash(obsolete))}"
         profile_path = repo / ".agent-loop" / "project.toml"
         profile_path.parent.mkdir(parents=True)
         profile_path.write_text(
-            "schema_version = 1\n" + delivery,
+            "schema_version = 1\n" + obsolete,
             encoding="utf-8",
         )
         with pytest.raises(ProfileError):
             load_project_profile(repo)
 
 
-def test_automatic_delivery_surface_is_absent() -> None:
-    assert not (AGENTS / "dx" / "delivery.py").exists()
-    assert not (AGENTS / "dx" / "delivery_job.py").exists()
-    assert not (REPO_ROOT / "docs" / "schemas" / "delivery-job.schema.json").exists()
+def test_remote_git_surface_is_absent() -> None:
     for path in (
         REPO_ROOT / "agent-loop",
         AGENTS / "run_task.sh",
@@ -177,22 +170,21 @@ def test_automatic_delivery_surface_is_absent() -> None:
         AGENTS / "dx" / "approval.py",
     ):
         source = path.read_text(encoding="utf-8")
-        assert "delivery-worker" not in source
-        assert "ensure_delivery_job" not in source
+        assert ".delivery.lock" not in source
+        assert "DELIVERY_FAILED" not in source
+        assert "PUSHED" not in source
     run_task = (AGENTS / "run_task.sh").read_text(encoding="utf-8")
     assert "Do not commit, push, merge, deploy, or access secrets." in run_task
     assert "git push" not in run_task
 
 
-def test_approval_is_local_terminal_and_creates_no_delivery_artifact(
+def test_approval_is_local_terminal(
     tmp_path: Path,
 ) -> None:
     env = make_local_run(tmp_path, approve=True)
     run_dir = env["run_dir"]
     assert read_status(run_dir) == STATUS_HUMAN_APPROVED
     assert plan_resume(run_dir)["resume_phase"] == "complete"
-    assert not (run_dir / "delivery-job.json").exists()
-    assert not (run_dir / "delivery.json").exists()
 
 
 def test_required_documentation_and_unsafe_paths(tmp_path: Path) -> None:

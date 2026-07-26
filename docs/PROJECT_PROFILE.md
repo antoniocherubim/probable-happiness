@@ -25,7 +25,6 @@ comando é um array `argv`; nenhum valor passa por `eval` ou shell implícito.
 | `instructions.executor/reviewer` | caminhos relativos | vazio, 256 KiB/arquivo |
 | `documentation.required` | booleano | `false` |
 | `documentation.required_paths` | templates relativos | vazio; `{task_id}`, `{task_slug}` |
-| `delivery.mode` | literal `none` | `none`; push automático removido |
 | `policy.missing_profile` | `allow` ou `deny` | `allow` |
 | `policy.terminate_grace_seconds` | inteiro | `5`, 1–300 |
 
@@ -48,14 +47,11 @@ URL de uma branch que ainda não existe.
 
 ## Aprovação local
 
-`run.json` registra `delivery.mode = "none"`. Após a decisão humana, o loop
-termina em `HUMAN_APPROVED` e preserva o worktree. Não cria index, commit,
-branch, job de delivery nem conexão Git remota.
+Após a decisão humana, o loop termina em `HUMAN_APPROVED` e preserva o
+worktree. Não cria index, commit, branch nem conexão Git remota.
 
 Use `agent-loop verify --run-dir ...` imediatamente antes da integração manual.
-Profiles antigos com `push_branch`, remote ou opções de push são recusados; a
-migração consiste em remover essas chaves ou definir somente
-`[delivery] mode = "none"`.
+Profiles com uma tabela `[delivery]` são recusados; remova a tabela inteira.
 
 ## Bootstrap e ambiente
 
@@ -114,7 +110,6 @@ BLOCKED + --review-only -> nova revisão do snapshot atual
 BLOCKED/max_review_iterations + orçamento explícito -> executor em N+1
 AWAITING_HUMAN_APPROVAL -> apenas retoma wait-decision
 HUMAN_APPROVED          -> valida decisão/hash; não repete gate
-DELIVERING/DELIVERY_FAILED/PUSHED legados -> valida decisão/hash; sem rede
 ```
 
 ```bash

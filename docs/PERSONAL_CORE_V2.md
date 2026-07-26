@@ -108,7 +108,8 @@ orçamento normal é uma iteração de implementação e uma corretiva.
 | Etapa | Resultado |
 |---|---|
 | PC-00 | contrato pessoal e reviewer limitado ao escopo — concluída |
-| PC-01 | `state.json` único; remoção de txn/migration/audit/delivery |
+| PC-01A | remoção completa do vocabulário de delivery — concluída |
+| PC-01B | `state.json` único; sem txn/migration/audit |
 | PC-02 | supervisor systemd e limites essenciais |
 | PC-03 | Telegram opcional, resume e E2E real |
 

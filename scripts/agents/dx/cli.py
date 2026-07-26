@@ -366,7 +366,6 @@ def cmd_init_run(args: argparse.Namespace) -> int:
                 "max_iterations": args.max_iterations,
                 "env_file": str(Path(args.env_file).expanduser().resolve()) if args.env_file else None,
                 "profile": profile.public_dict(),
-                "delivery": {"mode": "none"},
             },
         )
     except (OSError, ProfileError, RunStateError) as exc:

@@ -457,25 +457,6 @@ def test_concurrent_conflicting_events_have_exactly_one_winner(
     }
 
 
-@pytest.mark.parametrize(
-    "legacy",
-    (RunState.DELIVERING, RunState.DELIVERY_FAILED, RunState.PUSHED),
-)
-@pytest.mark.parametrize("event", tuple(RunEvent))
-def test_legacy_states_are_terminal(
-    tmp_path: Path,
-    legacy: RunState,
-    event: RunEvent,
-) -> None:
-    run_dir = tmp_path / f"{legacy.value}-{event.value}"
-    set_state_fixture(run_dir, legacy)
-
-    with pytest.raises(StateTransitionError):
-        transition_run(run_dir, event)
-
-    assert read_state(run_dir) == legacy
-
-
 def test_status_reader_rejects_symlink_and_oversized_file(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.write_text("EXECUTING\n", encoding="utf-8")

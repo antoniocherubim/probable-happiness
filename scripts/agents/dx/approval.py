@@ -25,9 +25,6 @@ STATUS_APPROVED = RunState.APPROVED.value
 STATUS_AWAITING = RunState.AWAITING_HUMAN_APPROVAL.value
 STATUS_HUMAN_APPROVED = RunState.HUMAN_APPROVED.value
 STATUS_BLOCKED = RunState.BLOCKED.value
-STATUS_DELIVERING = RunState.DELIVERING.value
-STATUS_PUSHED = RunState.PUSHED.value
-STATUS_DELIVERY_FAILED = RunState.DELIVERY_FAILED.value
 
 REQUEST_FILENAME = "human_approval_request.json"
 DECISION_FILENAME = "human_approval_decision.json"
@@ -335,7 +332,7 @@ def enqueue_notification(
     ``BLOCKED``).
     """
     run_dir = Path(run_dir)
-    if kind not in {"awaiting_human_approval", "blocked", "failure", "pushed", "delivery_failed"}:
+    if kind not in {"awaiting_human_approval", "blocked", "failure"}:
         raise ApprovalError(f"unsupported notify kind: {kind}")
 
     if kind == "awaiting_human_approval":
@@ -490,12 +487,7 @@ def _idempotent_replay_locked(
     current = read_status(run_dir)
     if current == STATUS_AWAITING:
         transition_run(run_dir, RunEvent.RECOVER_HUMAN_APPROVED)
-    elif current not in {
-        STATUS_HUMAN_APPROVED,
-        STATUS_DELIVERING,
-        STATUS_PUSHED,
-        STATUS_DELIVERY_FAILED,
-    }:
+    elif current != STATUS_HUMAN_APPROVED:
         raise ApprovalError(
             f"valid decision cannot recover incompatible status {current!r}"
         )
@@ -637,13 +629,8 @@ def verify_reviewed_snapshot(run_dir: Path) -> dict[str, Any]:
     """
     run_dir = Path(run_dir)
     request = load_request(run_dir)
-    if read_status(run_dir) not in {
-        STATUS_HUMAN_APPROVED,
-        STATUS_DELIVERING,
-        STATUS_PUSHED,
-        STATUS_DELIVERY_FAILED,
-    }:
-        raise ApprovalError("run is not HUMAN_APPROVED or in a valid approved delivery state")
+    if read_status(run_dir) != STATUS_HUMAN_APPROVED:
+        raise ApprovalError("run is not HUMAN_APPROVED")
     decision = load_decision(run_dir)
     if decision is None:
         raise ApprovalError("human approval decision missing")
@@ -688,12 +675,7 @@ def _decision_ready_locked(run_dir: Path) -> bool:
     if current == STATUS_AWAITING:
         transition_run(run_dir, RunEvent.RECOVER_HUMAN_APPROVED)
         return True
-    if current not in {
-        STATUS_HUMAN_APPROVED,
-        STATUS_DELIVERING,
-        STATUS_PUSHED,
-        STATUS_DELIVERY_FAILED,
-    }:
+    if current != STATUS_HUMAN_APPROVED:
         return False
     return True
 

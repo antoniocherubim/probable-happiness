@@ -27,11 +27,6 @@ class RunState(str, Enum):
     HUMAN_APPROVED = "HUMAN_APPROVED"
     BLOCKED = "BLOCKED"
 
-    # Compatibility only. No event may leave these states.
-    DELIVERING = "DELIVERING"
-    DELIVERY_FAILED = "DELIVERY_FAILED"
-    PUSHED = "PUSHED"
-
 
 class RunEvent(str, Enum):
     RUN_STARTED = "run_started"
@@ -243,12 +238,3 @@ def transition_run(
             current=spec.target,
             result="applied",
         )
-
-
-def is_legacy_terminal(state: RunState | str | None) -> bool:
-    typed = _coerce_state(state)
-    return typed in {
-        RunState.DELIVERING,
-        RunState.DELIVERY_FAILED,
-        RunState.PUSHED,
-    }

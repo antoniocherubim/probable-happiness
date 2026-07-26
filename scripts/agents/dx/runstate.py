@@ -332,20 +332,6 @@ def _failure_reason(run_dir: Path) -> tuple[str, dict[str, Any]]:
     return reason, failure
 
 
-def _probe_delivery_lock(run_dir: Path) -> None:
-    path = run_dir / ".delivery.lock"
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise IterationBudgetError("delivery lock is not a regular file")
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (BlockingIOError, OSError) as exc:
-        raise IterationBudgetError("a delivery operation is currently active") from exc
-    finally:
-        if "fd" in locals():
-            os.close(fd)
-
-
 def _review_sha256(path: Path) -> str:
     try:
         info = path.lstat()
@@ -388,9 +374,6 @@ def _authorize_iteration_extension_locked(
         "APPROVED",
         "AWAITING_HUMAN_APPROVAL",
         "HUMAN_APPROVED",
-        "DELIVERING",
-        "PUSHED",
-        "DELIVERY_FAILED",
     }
     if status in terminal:
         raise IterationBudgetError(
@@ -479,22 +462,20 @@ def _authorize_iteration_extension_locked(
     current_hash = compute_diff_hash(Path(metadata["worktree"]), str(metadata["base_commit"]))
     if not snapshot_hash or current_hash != snapshot_hash:
         raise IterationBudgetError("worktree drifted from the last reviewed snapshot")
-    approval_or_delivery_present = False
+    approval_present = False
     for name in (
         "human_approval_request.json",
         "human_approval_decision.json",
         "human_rejection.json",
-        "delivery.json",
     ):
         try:
             (run_dir / name).lstat()
         except FileNotFoundError:
             continue
-        approval_or_delivery_present = True
+        approval_present = True
         break
-    if approval_or_delivery_present:
-        raise IterationBudgetError("approval or delivery artifacts make this run ineligible")
-    _probe_delivery_lock(run_dir)
+    if approval_present:
+        raise IterationBudgetError("approval artifacts make this run ineligible")
     new_limit = effective_limit + additional_iterations
     if new_limit > MAX_EFFECTIVE_ITERATIONS:
         raise IterationBudgetError(
@@ -585,15 +566,7 @@ def plan_resume(run_dir: Path, *, review_only: bool = False) -> dict[str, Any]:
     if iteration < 1 or iteration > effective_limit:
         raise RunStateError("invalid iteration in run")
 
-    if status in {
-        "HUMAN_APPROVED",
-        "DELIVERING",
-        "DELIVERY_FAILED",
-        "PUSHED",
-    }:
-        # DELIVERING/DELIVERY_FAILED/PUSHED are retained only so runs created by
-        # older releases remain inspectable. Current releases never perform or
-        # resume network delivery.
+    if status == "HUMAN_APPROVED":
         validate_decision_matches_request(run_dir)
         phase = "complete"
     elif status == "AWAITING_HUMAN_APPROVAL":

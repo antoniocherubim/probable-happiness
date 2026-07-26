@@ -89,7 +89,7 @@ handle_loop_signal() {
       current_status="$(tr -d '\n' < "$RUN_DIR/status")"
     fi
     case "$current_status" in
-      HUMAN_APPROVED|DELIVERING|DELIVERY_FAILED|PUSHED|BLOCKED) ;;
+      HUMAN_APPROVED|BLOCKED) ;;
       *)
         block_run "Agent loop interrupted by $signal_name" "${CURRENT_PHASE:-loop}" "" "${CURRENT_PHASE:-loop}_interrupted"
         ;;
@@ -306,14 +306,10 @@ _run_task_entry() {
     die "invalid or required .agent-loop/project.toml"
 
   if [[ -n "$RESUME_RUN_DIR" && "$START_PHASE" == "complete" ]]; then
-    if [[ "$(tr -d '\n' < "$RUN_DIR/status")" == "PUSHED" ]]; then
-      note "legacy run already recorded as PUSHED; no network operation will be repeated"
-      exit 0
-    fi
     DX_CLI verify-reviewed-snapshot --run-dir "$RUN_DIR" >/dev/null || \
       die "approved run no longer matches reviewed snapshot"
     note "run already approved and snapshot still matches"
-    note "automatic delivery is disabled; integration and push remain manual"
+    note "integration remains manual"
     exit 0
   fi
   if [[ -n "$RESUME_RUN_DIR" && "$START_PHASE" == "awaiting_human" ]]; then

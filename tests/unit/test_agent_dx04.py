@@ -73,7 +73,6 @@ def make_exhausted_run(
             "max_iterations": 3,
             "env_file": None,
             "profile": ProjectProfile().public_dict(),
-            "delivery": {"mode": "none"},
         },
     )
     (run_dir / "iteration").write_text("3\n", encoding="utf-8")
@@ -191,13 +190,9 @@ def test_two_concurrent_authorizations_create_one_extension(tmp_path: Path) -> N
     assert len(load_iteration_budget(env["run_dir"], 3)["extensions"]) == 1
 
 
-@pytest.mark.parametrize("lock_name", [".resume.lock", ".delivery.lock"])
-def test_active_resume_or_delivery_lock_refuses_authorization(
-    tmp_path: Path,
-    lock_name: str,
-) -> None:
+def test_active_resume_lock_refuses_authorization(tmp_path: Path) -> None:
     env = make_exhausted_run(tmp_path)
-    lock_path = env["run_dir"] / lock_name
+    lock_path = env["run_dir"] / ".resume.lock"
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -241,12 +236,9 @@ def test_other_block_reason_is_refused_with_actual_reason(tmp_path: Path) -> Non
         "APPROVED",
         "AWAITING_HUMAN_APPROVAL",
         "HUMAN_APPROVED",
-        "DELIVERING",
-        "PUSHED",
-        "DELIVERY_FAILED",
     ],
 )
-def test_approval_and_delivery_states_are_never_extendable(
+def test_approval_states_are_never_extendable(
     tmp_path: Path,
     status: str,
 ) -> None:
@@ -430,7 +422,6 @@ def test_executor_receives_last_feedback_and_approval_reaches_human_gate(
     assert (env["run_dir"] / "human_approval_request.json").is_file()
     assert read_status(env["run_dir"]) == "AWAITING_HUMAN_APPROVAL"
     assert not (env["run_dir"] / "human_approval_decision.json").exists()
-    assert not (env["run_dir"] / "delivery.json").exists()
 
 
 def test_changes_requested_blocks_again_at_effective_limit(tmp_path: Path) -> None:
