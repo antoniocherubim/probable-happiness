@@ -578,6 +578,17 @@ def cmd_transition_state(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_current_status(args: argparse.Namespace) -> int:
+    from .state_machine import read_status
+
+    try:
+        print(read_status(Path(args.run_dir)))
+    except (OSError, StateTransitionError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_record_failure(args: argparse.Namespace) -> int:
     from .approval import utc_now_iso
 
@@ -809,6 +820,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[event.value for event in RUNNER_TRANSITION_EVENTS],
     )
     p.set_defaults(func=cmd_transition_state)
+
+    p = sub.add_parser("current-status", help="Read the authoritative run status")
+    p.add_argument("--run-dir", required=True)
+    p.set_defaults(func=cmd_current_status)
 
     p = sub.add_parser("record-failure", help="Atomically block a run with structured reason")
     p.add_argument("--run-dir", required=True)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 from contextlib import nullcontext
@@ -10,12 +11,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Iterable
 
-from .atomic import atomic_write_text, run_scoped_lock
+from .atomic import atomic_write_json, run_scoped_lock
 
 
-STATUS_FILENAME = "status"
+STATE_FILENAME = "state.json"
 STATE_LOCK_FILENAME = ".state.lock"
-_MAX_STATUS_BYTES = 128
+_MAX_STATE_BYTES = 1024 * 1024
 
 
 class RunState(str, Enum):
@@ -144,19 +145,20 @@ def _coerce_state(value: RunState | str | None) -> RunState | None:
         raise StateTransitionError(f"unknown run status: {value!r}") from exc
 
 
-def read_state(run_dir: Path | str) -> RunState | None:
-    """Read a short regular status file without following symlinks."""
-    path = Path(run_dir) / STATUS_FILENAME
+def read_state_document(run_dir: Path | str) -> dict[str, object] | None:
+    """Read and validate the authoritative state without following symlinks."""
+    run_path = Path(run_dir)
+    path = run_path / STATE_FILENAME
     try:
         before = path.lstat()
     except FileNotFoundError:
         return None
     except OSError as exc:
-        raise StateTransitionError("run status cannot be inspected") from exc
+        raise StateTransitionError("run state cannot be inspected") from exc
     if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-        raise StateTransitionError("run status must be a regular non-symlink file")
-    if before.st_size > _MAX_STATUS_BYTES:
-        raise StateTransitionError("run status is oversized")
+        raise StateTransitionError("run state must be a regular non-symlink file")
+    if before.st_size > _MAX_STATE_BYTES:
+        raise StateTransitionError("run state is oversized")
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         try:
@@ -165,19 +167,56 @@ def read_state(run_dir: Path | str) -> RunState | None:
                 not stat.S_ISREG(opened.st_mode)
                 or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
             ):
-                raise StateTransitionError("run status changed while opening")
-            raw = os.read(fd, _MAX_STATUS_BYTES + 1)
+                raise StateTransitionError("run state changed while opening")
+            raw = os.read(fd, _MAX_STATE_BYTES + 1)
         finally:
             os.close(fd)
     except OSError as exc:
-        raise StateTransitionError("run status cannot be read safely") from exc
-    if len(raw) > _MAX_STATUS_BYTES:
-        raise StateTransitionError("run status is oversized")
+        raise StateTransitionError("run state cannot be read safely") from exc
+    if len(raw) > _MAX_STATE_BYTES:
+        raise StateTransitionError("run state is oversized")
     try:
-        value = raw.decode("utf-8").strip()
-    except UnicodeDecodeError as exc:
-        raise StateTransitionError("run status is not UTF-8") from exc
-    return _coerce_state(value)
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StateTransitionError("run state is not valid JSON") from exc
+    if not isinstance(document, dict):
+        raise StateTransitionError("run state must be a JSON object")
+    if document.get("schema_version") != 1:
+        raise StateTransitionError("run state schema mismatch")
+    if document.get("run_id") != run_path.name:
+        raise StateTransitionError("run state binding mismatch")
+    _coerce_state(document.get("status"))
+    metadata = document.get("metadata", {})
+    if not isinstance(metadata, dict):
+        raise StateTransitionError("run state metadata must be an object")
+    return document
+
+
+def initialize_run_state(
+    run_dir: Path | str,
+    metadata: dict[str, object],
+) -> dict[str, object]:
+    """Bind immutable run metadata while preserving an already-published status."""
+    run_path = Path(run_dir)
+    with run_scoped_lock(run_path, lock_name=STATE_LOCK_FILENAME):
+        existing = read_state_document(run_path)
+        if existing is not None and existing.get("metadata"):
+            if existing["metadata"] != metadata:
+                raise StateTransitionError("run metadata already initialized differently")
+            return existing
+        document: dict[str, object] = {
+            "schema_version": 1,
+            "run_id": run_path.name,
+            "status": existing.get("status") if existing else None,
+            "metadata": metadata,
+        }
+        atomic_write_json(run_path / STATE_FILENAME, document)
+        return document
+
+
+def read_state(run_dir: Path | str) -> RunState | None:
+    document = read_state_document(run_dir)
+    return _coerce_state(document.get("status")) if document is not None else None
 
 
 def read_status(run_dir: Path | str) -> str:
@@ -207,7 +246,8 @@ def transition_run(
         else run_scoped_lock(run_path, lock_name=STATE_LOCK_FILENAME)
     )
     with lock:
-        current = read_state(run_path)
+        document = read_state_document(run_path)
+        current = _coerce_state(document.get("status")) if document else None
         if expected is not None and current not in expected:
             raise StateTransitionError(
                 f"event {typed_event.value} expected "
@@ -231,7 +271,16 @@ def transition_run(
                 f"event {typed_event.value} cannot transition "
                 f"{current.value if current else '<empty>'} to {spec.target.value}"
             )
-        atomic_write_text(run_path / STATUS_FILENAME, spec.target.value)
+        updated: dict[str, object] = dict(
+            document
+            or {
+                "schema_version": 1,
+                "run_id": run_path.name,
+                "metadata": {},
+            }
+        )
+        updated["status"] = spec.target.value
+        atomic_write_json(run_path / STATE_FILENAME, updated)
         return TransitionResult(
             event=typed_event,
             previous=current,

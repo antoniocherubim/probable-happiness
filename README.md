@@ -104,10 +104,10 @@ iteração e o run termina em `BLOCKED` com motivo estruturado
 ```
 
 Cada extensão aceita de 1 a 20 iterações; o limite efetivo total é 50. O
-`max_iterations` original em `run.json` não muda. A cadeia auditável fica em
-`iteration-budget.json`, vinculada ao último feedback e hash revisado. Repetir o
-mesmo comando durante a extensão ativa é idempotente. Outras causas de
-`BLOCKED`, drift, estados de aprovação e combinação com
+`max_iterations` original na metadata de `state.json` não muda. A cadeia
+auditável fica em `iteration-budget.json`, vinculada ao último feedback e hash
+revisado. Repetir o mesmo comando durante a extensão ativa é idempotente. Outras
+causas de `BLOCKED`, drift, estados de aprovação e combinação com
 `--review-only` são recusados sem novo orçamento.
 
 ## systemd --user

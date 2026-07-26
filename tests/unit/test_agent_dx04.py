@@ -18,7 +18,7 @@ AGENTS = REPO_ROOT / "scripts" / "agents"
 sys.path.insert(0, str(AGENTS))
 
 from dx.approval import compute_diff_hash, read_status  # noqa: E402
-from dx.atomic import atomic_write_json, atomic_write_text  # noqa: E402
+from dx.atomic import atomic_write_json  # noqa: E402
 from dx.profile import ProjectProfile  # noqa: E402
 from dx.runstate import (  # noqa: E402
     ITERATION_BUDGET,
@@ -29,7 +29,12 @@ from dx.runstate import (  # noqa: E402
     plan_resume,
     write_run_metadata,
 )
-from dx.state_machine import RunEvent, transition_run  # noqa: E402
+from dx.state_machine import (  # noqa: E402
+    STATE_FILENAME,
+    RunEvent,
+    read_state_document,
+    transition_run,
+)
 
 
 def git(repo: Path, *args: str) -> str:
@@ -133,7 +138,7 @@ def make_exhausted_run(
 
 def test_blocked_limit_plus_three_continues_at_iteration_four(tmp_path: Path) -> None:
     env = make_exhausted_run(tmp_path)
-    run_json_before = (env["run_dir"] / "run.json").read_bytes()
+    metadata_before = read_state_document(env["run_dir"])["metadata"]
     result = authorize_iteration_extension(env["run_dir"], 3)
     plan = plan_resume(env["run_dir"])
     budget = load_iteration_budget(env["run_dir"], 3)
@@ -148,7 +153,7 @@ def test_blocked_limit_plus_three_continues_at_iteration_four(tmp_path: Path) ->
     assert budget["effective_limit"] == 6
     assert budget["extensions"][0]["origin"] == "cli"
     assert len(budget["extensions"][0]["idempotency_id"]) == 64
-    assert (env["run_dir"] / "run.json").read_bytes() == run_json_before
+    assert read_state_document(env["run_dir"])["metadata"] == metadata_before
     assert read_status(env["run_dir"]) == "CHANGES_REQUESTED"
 
 
@@ -243,9 +248,12 @@ def test_approval_states_are_never_extendable(
     status: str,
 ) -> None:
     env = make_exhausted_run(tmp_path)
-    # Fixture for active and historical terminal states. A real run cannot
-    # transition out of BLOCKED into any of these states.
-    atomic_write_text(env["run_dir"] / "status", status)
+    state = read_state_document(env["run_dir"])
+    assert state is not None
+    atomic_write_json(
+        env["run_dir"] / STATE_FILENAME,
+        {**state, "status": status},
+    )
     with pytest.raises(IterationBudgetError, match=status):
         authorize_iteration_extension(env["run_dir"], 3)
     assert not (env["run_dir"] / ITERATION_BUDGET).exists()

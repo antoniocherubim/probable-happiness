@@ -12,6 +12,15 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def atomic_write_bytes(path: Path, content: bytes, mode: int = 0o600) -> None:
     """Atomically replace a file without changing its byte content."""
     path = Path(path)
@@ -21,9 +30,10 @@ def atomic_write_bytes(path: Path, content: bytes, mode: int = 0o600) -> None:
         with os.fdopen(fd, "wb") as handle:
             handle.write(content)
             handle.flush()
+            os.fchmod(handle.fileno(), mode)
             os.fsync(handle.fileno())
-        os.chmod(tmp_name, mode)
         os.replace(tmp_name, path)
+        _fsync_directory(path.parent)
     except Exception:
         try:
             os.unlink(tmp_name)
@@ -43,9 +53,10 @@ def atomic_write_text(path: Path, content: str, mode: int = 0o600) -> None:
             if not content.endswith("\n"):
                 handle.write("\n")
             handle.flush()
+            os.fchmod(handle.fileno(), mode)
             os.fsync(handle.fileno())
-        os.chmod(tmp_name, mode)
         os.replace(tmp_name, path)
+        _fsync_directory(path.parent)
     except Exception:
         try:
             os.unlink(tmp_name)
@@ -78,12 +89,13 @@ def exclusive_write_json(path: Path, payload: dict[str, Any], mode: int = 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(content)
             handle.flush()
+            os.fchmod(handle.fileno(), mode)
             os.fsync(handle.fileno())
-        os.chmod(tmp_name, mode)
         try:
             os.link(tmp_name, str(path))
         except FileExistsError:
             return False
+        _fsync_directory(path.parent)
         return True
     finally:
         try:

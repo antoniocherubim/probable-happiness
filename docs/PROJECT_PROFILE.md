@@ -127,7 +127,7 @@ humano é recusado. Um `APPROVED` isolado sempre volta a uma nova revisão.
 ### Ledger de orçamento
 
 `--additional-iterations` aceita de 1 a 20 e nunca altera o limite original em
-`run.json`; o limite efetivo acumulado não pode ultrapassar 50. A autorização
+`state.json`; o limite efetivo acumulado não pode ultrapassar 50. A autorização
 exige simultaneamente:
 
 - status `BLOCKED` e `failure.json.reason = "max_review_iterations"` (o legado

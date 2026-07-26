@@ -1,6 +1,6 @@
 # Personal Core v2
 
-Status: reorganização em andamento; PC-00 concluída.
+Status: reorganização em andamento; PC-01B1 concluída.
 
 Esta linha substitui o roadmap de produto público por um runner pequeno para
 uso pessoal. A branch `personal-stable` permanece como referência do protótipo
@@ -109,7 +109,7 @@ orçamento normal é uma iteração de implementação e uma corretiva.
 |---|---|
 | PC-00 | contrato pessoal e reviewer limitado ao escopo — concluída |
 | PC-01A | remoção completa do vocabulário de delivery — concluída |
-| PC-01B1 | `state.json` para metadata e status |
+| PC-01B1 | `state.json` para metadata e status — concluída |
 | PC-01B2 | failure, decisão e orçamento dentro do estado |
 | PC-02 | supervisor systemd e limites essenciais |
 | PC-03 | Telegram opcional, resume e E2E real |

@@ -51,6 +51,10 @@ transition_run_state() {
   DX_CLI transition-state --run-dir "$RUN_DIR" --event "$event" >/dev/null
 }
 
+read_run_status() {
+  DX_CLI current-status --run-dir "$RUN_DIR"
+}
+
 block_run() {
   local reason="$1"
   local phase="$2"
@@ -85,8 +89,8 @@ handle_loop_signal() {
   local current_status=""
   trap - INT TERM HUP
   if [[ -n "${RUN_DIR:-}" && -d "$RUN_DIR" ]]; then
-    if [[ -f "$RUN_DIR/status" ]]; then
-      current_status="$(tr -d '\n' < "$RUN_DIR/status")"
+    if [[ -f "$RUN_DIR/state.json" ]]; then
+      current_status="$(read_run_status)"
     fi
     case "$current_status" in
       HUMAN_APPROVED|BLOCKED) ;;
@@ -94,7 +98,7 @@ handle_loop_signal() {
         block_run "Agent loop interrupted by $signal_name" "${CURRENT_PHASE:-loop}" "" "${CURRENT_PHASE:-loop}_interrupted"
         ;;
     esac
-    note "interrupted by $signal_name; status=$(tr -d '\n' < "$RUN_DIR/status"); worktree preserved: ${WORKTREE:-unknown}"
+    note "interrupted by $signal_name; status=$(read_run_status); worktree preserved: ${WORKTREE:-unknown}"
   fi
   exit "$exit_code"
 }
@@ -402,7 +406,7 @@ _run_task_entry() {
       --task-file "$TASK_FILE" --base-commit "$BASE_COMMIT" --max-iterations "$MAX_ITERATIONS")
     if [[ -n "$ENV_FILE" ]]; then INIT_ARGS+=(--env-file "$ENV_FILE"); fi
     if ! DX_CLI "${INIT_ARGS[@]}" >/dev/null; then
-      block_run "Failed to initialize resumable run metadata" setup "run.json" run_metadata_invalid
+      block_run "Failed to initialize resumable run metadata" setup "state.json" run_metadata_invalid
       die "failed to initialize resumable run metadata"
     fi
   fi

@@ -20,10 +20,16 @@ from .approval import (
 )
 from .atomic import atomic_write_json, read_json, run_scoped_lock
 from .profile import ProfileError, load_project_profile
-from .state_machine import RunEvent, transition_run
+from .state_machine import (
+    RunEvent,
+    StateTransitionError,
+    initialize_run_state,
+    read_state_document,
+    transition_run,
+)
 
 
-RUN_METADATA = "run.json"
+RUN_METADATA = "state.json"
 EVIDENCE_MANIFEST = "evidence.json"
 MAX_EVIDENCE_BYTES = 1024 * 1024
 ITERATION_BUDGET = "iteration-budget.json"
@@ -47,20 +53,23 @@ def write_run_metadata(run_dir: Path, payload: dict[str, Any]) -> dict[str, Any]
     missing = required - set(payload)
     if missing:
         raise RunStateError(f"run metadata missing: {', '.join(sorted(missing))}")
-    document = {"schema_version": 1, "run_id": Path(run_dir).name, **payload}
-    atomic_write_json(Path(run_dir) / RUN_METADATA, document)
-    return document
+    try:
+        initialize_run_state(Path(run_dir), payload)
+    except StateTransitionError as exc:
+        raise RunStateError(str(exc)) from exc
+    return {"schema_version": 1, "run_id": Path(run_dir).name, **payload}
 
 
 def load_run_metadata(run_dir: Path) -> dict[str, Any]:
-    path = Path(run_dir) / RUN_METADATA
     try:
-        data = read_json(path)
-    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        state = read_state_document(run_dir)
+    except (OSError, StateTransitionError) as exc:
         raise RunStateError(f"invalid run metadata: {exc}") from exc
-    if data.get("schema_version") != 1 or data.get("run_id") != Path(run_dir).name:
-        raise RunStateError("run metadata binding mismatch")
-    return data
+    if state is None or not state.get("metadata"):
+        raise RunStateError("run metadata is missing")
+    metadata = state["metadata"]
+    assert isinstance(metadata, dict)
+    return {"schema_version": 1, "run_id": state["run_id"], **metadata}
 
 
 def _git_output(*args: str) -> str:

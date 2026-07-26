@@ -168,8 +168,9 @@ bot somente nesse processo; não existe worker de push no produto estável.
 ## Estados e falhas
 
 Todas as mudanças abaixo passam pela máquina central de eventos sob
-`.state.lock`. Replays idempotentes não reescrevem `status`; uma aresta
-incompatível falha sem mutação. A ordem quando há composição é
+`.state.lock`. Metadata e status ficam no único `state.json`; replays
+idempotentes não reescrevem o arquivo e uma aresta incompatível falha sem
+mutação. A ordem quando há composição é
 `.resume.lock` → `.approval.lock` → `.state.lock`.
 
 - `EXECUTING`: Cursor trabalhando;
