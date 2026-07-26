@@ -23,6 +23,13 @@ _SAFE_SECTIONS = {
     "validation": {"commands"},
     "instructions": {"executor", "reviewer"},
     "documentation": {"required", "required_paths"},
+    "limits": {
+        "output_bytes",
+        "file_bytes",
+        "memory_bytes",
+        "tasks",
+        "run_files",
+    },
     "policy": {"missing_profile", "terminate_grace_seconds"},
 }
 _DOCUMENTATION_FIELDS = {"task_id", "task_slug"}
@@ -67,6 +74,11 @@ class ProjectProfile:
     reviewer_instructions: tuple[str, ...] = ()
     documentation_required: bool = False
     documentation_paths: tuple[str, ...] = ()
+    output_limit_bytes: int = 16 * 1024 * 1024
+    file_limit_bytes: int = 64 * 1024 * 1024
+    memory_limit_bytes: int = 4 * 1024 * 1024 * 1024
+    task_limit: int = 512
+    run_file_limit: int = 512
     missing_profile: str = "allow"
     terminate_grace_seconds: int = 5
 
@@ -96,6 +108,13 @@ class ProjectProfile:
             "documentation": {
                 "required": self.documentation_required,
                 "required_paths": list(self.documentation_paths),
+            },
+            "limits": {
+                "output_bytes": self.output_limit_bytes,
+                "file_bytes": self.file_limit_bytes,
+                "memory_bytes": self.memory_limit_bytes,
+                "tasks": self.task_limit,
+                "run_files": self.run_file_limit,
             },
             "policy": {
                 "missing_profile": self.missing_profile,
@@ -210,6 +229,7 @@ def load_project_profile(repo: Path | str, *, missing_policy: str = "allow") -> 
     validation = _table(data, "validation")
     instructions = _table(data, "instructions")
     documentation = _table(data, "documentation")
+    limits = _table(data, "limits")
     policy = _table(data, "policy")
     configured_missing = policy.get("missing_profile", "allow")
     if configured_missing not in {"allow", "deny"}:
@@ -257,6 +277,41 @@ def load_project_profile(repo: Path | str, *, missing_policy: str = "allow") -> 
         reviewer_instructions=_string_list(instructions.get("reviewer"), "instructions.reviewer"),
         documentation_required=documentation_required,
         documentation_paths=documentation_paths,
+        output_limit_bytes=_bounded_int(
+            limits.get("output_bytes"),
+            "limits.output_bytes",
+            16 * 1024 * 1024,
+            low=64 * 1024,
+            high=1024 * 1024 * 1024,
+        ),
+        file_limit_bytes=_bounded_int(
+            limits.get("file_bytes"),
+            "limits.file_bytes",
+            64 * 1024 * 1024,
+            low=64 * 1024,
+            high=4 * 1024 * 1024 * 1024,
+        ),
+        memory_limit_bytes=_bounded_int(
+            limits.get("memory_bytes"),
+            "limits.memory_bytes",
+            4 * 1024 * 1024 * 1024,
+            low=64 * 1024 * 1024,
+            high=1024 * 1024 * 1024 * 1024,
+        ),
+        task_limit=_bounded_int(
+            limits.get("tasks"),
+            "limits.tasks",
+            512,
+            low=16,
+            high=32768,
+        ),
+        run_file_limit=_bounded_int(
+            limits.get("run_files"),
+            "limits.run_files",
+            512,
+            low=32,
+            high=100000,
+        ),
         missing_profile=configured_missing,
         terminate_grace_seconds=_bounded_int(
             policy.get("terminate_grace_seconds"),

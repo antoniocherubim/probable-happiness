@@ -40,7 +40,8 @@ python3 -m venv venv
 venv/bin/pip install -r requirements.txt
 ```
 
-Também são necessários `git`, `flock`, Cursor Agent e Codex CLI autenticados.
+Também são necessários `git`, `flock`, `systemd-run`, `systemctl`, `prlimit`,
+Cursor Agent e Codex CLI autenticados.
 
 ## Uso externo
 

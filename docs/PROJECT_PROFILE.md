@@ -25,6 +25,11 @@ comando é um array `argv`; nenhum valor passa por `eval` ou shell implícito.
 | `instructions.executor/reviewer` | caminhos relativos | vazio, 256 KiB/arquivo |
 | `documentation.required` | booleano | `false` |
 | `documentation.required_paths` | templates relativos | vazio; `{task_id}`, `{task_slug}` |
+| `limits.output_bytes` | inteiro | 16 MiB combinados de stdout/stderr |
+| `limits.file_bytes` | inteiro | 64 MiB por arquivo |
+| `limits.memory_bytes` | inteiro | 4 GiB no cgroup |
+| `limits.tasks` | inteiro | 512 processos/threads no cgroup |
+| `limits.run_files` | inteiro | 512 arquivos no run |
 | `policy.missing_profile` | `allow` ou `deny` | `allow` |
 | `policy.terminate_grace_seconds` | inteiro | `5`, 1–300 |
 
@@ -93,6 +98,12 @@ worktree permanece; o campo `failure` de `state.json` registra
 `executor_timeout`, `reviewer_timeout`, `*_empty_report` etc., e o status fica
 `BLOCKED`. Saída vazia nunca é sucesso. Sem acesso ao manager do usuário, a fase
 é recusada antes de executar o comando.
+
+`MemoryMax` e `TasksMax` são aplicados diretamente ao scope. `prlimit` fixa um
+limite hard de tamanho por arquivo para a árvore de processos. Stdout e stderr
+compartilham o orçamento de `limits.output_bytes`; ao excedê-lo, o scope é
+encerrado e o resultado registra `*_output_limit`. O número e tamanho dos
+artefatos do run são verificados antes de qualquer leitura/sanitização.
 
 Durante a fase, `heartbeat.json` é substituído atomicamente e uma linha segura
 mostra fase, iteração, elapsed, PID, unidade systemd, última atividade, arquivos

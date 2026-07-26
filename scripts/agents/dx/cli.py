@@ -283,6 +283,11 @@ def _run_profile_command(
             timeout_seconds=timeout,
             heartbeat_seconds=heartbeat,
             terminate_grace_seconds=profile.terminate_grace_seconds,
+            max_output_bytes=profile.output_limit_bytes,
+            max_file_bytes=profile.file_limit_bytes,
+            max_run_files=profile.run_file_limit,
+            memory_limit_bytes=profile.memory_limit_bytes,
+            task_limit=profile.task_limit,
             report_path=report,
             sanitize_artifacts=artifacts or (),
         )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -202,6 +203,9 @@ def start_scoped_popen(
     basename: str,
     cwd: Path,
     environment: Mapping[str, str],
+    file_limit_bytes: int,
+    memory_limit_bytes: int,
+    task_limit: int,
 ) -> subprocess.Popen[bytes]:
     """Start a command in a required user scope or fail before returning."""
     if not command:
@@ -221,6 +225,9 @@ def start_scoped_popen(
                 f"stale scope {_unit_name(basename)} was not collected"
             )
         time.sleep(0.05)
+    prlimit = shutil.which("prlimit", path=environment.get("PATH"))
+    if prlimit is None:
+        raise SystemdScopeError("prlimit is required to enforce file limits")
 
     argv = [
         "systemd-run",
@@ -230,7 +237,12 @@ def start_scoped_popen(
         "--collect",
         f"--unit={basename}",
         "--property=KillMode=control-group",
+        f"--property=MemoryMax={memory_limit_bytes}",
+        f"--property=TasksMax={task_limit}",
         f"--working-directory={cwd}",
+        "--",
+        prlimit,
+        f"--fsize={file_limit_bytes}:{file_limit_bytes}",
         "--",
         *command,
     ]

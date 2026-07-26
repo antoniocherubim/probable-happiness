@@ -429,7 +429,9 @@ _run_task_entry() {
     BOOTSTRAP_EXIT=$?
     set -e
     if [[ "$BOOTSTRAP_EXIT" -ne 0 ]]; then
-      if [[ "$BOOTSTRAP_EXIT" -eq 124 ]]; then BOOTSTRAP_REASON="bootstrap_timeout"; else BOOTSTRAP_REASON="bootstrap_failed"; fi
+      if [[ "$BOOTSTRAP_EXIT" -eq 124 ]]; then BOOTSTRAP_REASON="bootstrap_timeout";
+      elif [[ "$BOOTSTRAP_EXIT" -eq 125 ]]; then BOOTSTRAP_REASON="bootstrap_resource_limit";
+      else BOOTSTRAP_REASON="bootstrap_failed"; fi
       block_run "Project bootstrap failed with exit $BOOTSTRAP_EXIT" bootstrap "bootstrap.log" "$BOOTSTRAP_REASON"
       die "project bootstrap failed; worktree preserved at $WORKTREE"
     fi
@@ -473,6 +475,7 @@ _run_task_entry() {
     set -e
       if [[ "$CURSOR_EXIT" -ne 0 || ! -s "$EXECUTOR_REPORT" ]]; then
         if [[ "$CURSOR_EXIT" -eq 124 ]]; then CURSOR_REASON="executor_timeout"; \
+        elif [[ "$CURSOR_EXIT" -eq 125 ]]; then CURSOR_REASON="executor_resource_limit"; \
         elif [[ ! -s "$EXECUTOR_REPORT" ]]; then CURSOR_REASON="executor_empty_report"; \
         else CURSOR_REASON="executor_failed"; fi
         block_run "Cursor Agent failed with exit $CURSOR_EXIT" executor "$(basename "$EXECUTOR_REPORT")" "$CURSOR_REASON"
@@ -499,7 +502,9 @@ _run_task_entry() {
       VALIDATION_EXIT=$?
       set -e
       if [[ "$VALIDATION_EXIT" -ne 0 ]]; then
-        if [[ "$VALIDATION_EXIT" -eq 124 ]]; then VALIDATION_REASON="validation_timeout"; else VALIDATION_REASON="validation_failed"; fi
+        if [[ "$VALIDATION_EXIT" -eq 124 ]]; then VALIDATION_REASON="validation_timeout";
+        elif [[ "$VALIDATION_EXIT" -eq 125 ]]; then VALIDATION_REASON="validation_resource_limit";
+        else VALIDATION_REASON="validation_failed"; fi
         block_run "Configured validation failed with exit $VALIDATION_EXIT" validation "validation.log" "$VALIDATION_REASON"
         die "configured validation failed; worktree preserved at $WORKTREE"
       fi
@@ -556,6 +561,7 @@ _run_task_entry() {
     set -e
     if [[ "$CODEX_EXIT" -ne 0 || ! -s "$REVIEW_CANDIDATE" ]]; then
       if [[ "$CODEX_EXIT" -eq 124 ]]; then CODEX_REASON="reviewer_timeout"; \
+      elif [[ "$CODEX_EXIT" -eq 125 ]]; then CODEX_REASON="reviewer_resource_limit"; \
       elif [[ ! -s "$REVIEW_CANDIDATE" ]]; then CODEX_REASON="reviewer_empty_report"; \
       else CODEX_REASON="reviewer_failed"; fi
       block_run "Codex review failed with exit $CODEX_EXIT" reviewer "$(basename "$REVIEW_CANDIDATE")" "$CODEX_REASON"
