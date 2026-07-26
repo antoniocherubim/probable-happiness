@@ -1,6 +1,6 @@
 # Personal Core v2
 
-Status: reorganização em andamento; PC-01B concluída.
+Status: Personal Core v2 concluído para uso pessoal.
 
 Esta linha substitui o roadmap de produto público por um runner pequeno para
 uso pessoal. A branch `personal-stable` permanece como referência do protótipo
@@ -17,7 +17,7 @@ Fluxo:
 2. executar Cursor Agent;
 3. executar validações configuradas;
 4. revisar o diff com Codex;
-5. repetir no máximo uma vez quando houver defeito pertencente à task;
+5. repetir somente dentro do orçamento de iterações autorizado;
 6. opcionalmente pedir aprovação pelo Telegram;
 7. verificar novamente o hash e preservar a worktree.
 
@@ -32,11 +32,14 @@ Fluxo:
 - `state.json`, sob um único `flock`, é a única autoridade de estado;
 - escrita de estado usa arquivo temporário, `fsync`, replace e `fsync` do
   diretório;
-- reports são evidência não confiável; quando relevantes, o estado guarda seu
-  hash;
-- o snapshot aprovado é imutável e verificado antes da integração manual;
+- reports são evidência não confiável e recebem bindings por hash quando
+  relevantes;
+- o hash do snapshot aprovado é imutável e verificado antes da integração
+  manual;
 - state root, run dirs e artefatos privados usam `0700`/`0600`;
-- segredos são allowlisted por fase e nunca entram em logs.
+- segredos são allowlisted por fase e redigidos dos artefatos finais;
+- fases supervisionadas aceitam somente o protocolo Git local `file`;
+  transportes Git remotos falham antes de abrir conexão.
 
 ## Modelo de confiança
 
@@ -48,18 +51,18 @@ Fluxo:
 
 ## Estado simples
 
-Cada run novo terá um único `state.json` versionado contendo:
+Cada run novo tem um único `state.json` versionado contendo:
 
 - identidade do run, repositório, task, worktree e base commit;
-- status, fase, iteração e orçamento;
-- resultado/falha estruturados;
-- hash do diff revisado;
-- decisão humana, quando utilizada;
-- timestamp da última atualização.
+- status atual;
+- falha estruturada, quando houver;
+- orçamento adicional, quando autorizado;
+- decisão humana, quando utilizada.
 
-Artefatos grandes continuam em arquivos separados e são referenciados por hash.
-Uma escrita incompleta nunca substitui o último `state.json` válido. Arquivo
-publicado antes de uma queda e ainda não referenciado é órfão descartável.
+Cursor de iteração, reports, manifestos e diffs continuam em arquivos separados.
+Os artefatos relevantes são vinculados por hash. Uma escrita incompleta nunca
+substitui o último `state.json` válido; um arquivo publicado antes de uma queda
+e ainda não referenciado é órfão descartável.
 
 Não haverá journal transacional próprio, audit chain, registry de migrations,
 rollback de schema ou compatibilidade de escrita com runs anteriores. A branch
@@ -101,23 +104,23 @@ O reviewer valida somente:
 
 Concorrência, segurança, migrations ou refatorações não citadas pela task não
 podem bloquear o run. Devem aparecer, no máximo, como nota de backlog. O
-orçamento normal é uma iteração de implementação e uma corretiva.
+orçamento deve permanecer pequeno e ser estendido somente por decisão explícita.
 
-## Sequência de construção
+## Estado atual
 
-| Etapa | Resultado |
-|---|---|
-| PC-00 | contrato pessoal e reviewer limitado ao escopo — concluída |
-| PC-01A | remoção completa do vocabulário de delivery — concluída |
-| PC-01B1 | `state.json` para metadata e status — concluída |
-| PC-01B2a | failure dentro do estado — concluída |
-| PC-01B2b | orçamento dentro do estado — concluída |
-| PC-01B2c | decisão humana dentro do estado — concluída |
-| PC-02 | supervisor systemd e limites essenciais |
-| PC-03 | Telegram opcional, resume e E2E real |
+- `state.json` concentra metadata, status, falha, orçamento e decisão;
+- todas as fases exigem scope `systemd --user` e cotas configuradas;
+- Telegram é opcional e nunca executa Git;
+- `resume` e `verify` revalidam o snapshot congelado;
+- integração e publicação Git permanecem manuais.
 
 ## Critério de conclusão
 
 Um teste ponta a ponta deve provar: execução, mudança, validação, review,
 aprovação, verificação do hash e interrupção por sinal/timeout/limite sem
 processos sobreviventes. Nenhuma etapa pode acessar uma rede Git.
+
+Gate final: **211 testes passaram**, sem skips. O E2E local provou execução,
+mudança, validação, review, aceite técnico, `verify`, `resume` e recusa de
+transportes Git HTTPS/SSH. Os testes systemd reais provaram limpeza após sucesso,
+erro, sinal, timeout e cotas; nenhum scope do runner permaneceu ativo.

@@ -14,6 +14,7 @@ comando é um array `argv`; nenhum valor passa por `eval` ou shell implícito.
 | Campo | Tipo | Default/restrição |
 |---|---|---|
 | `schema_version` | inteiro | obrigatório, `1` |
+| `approval.mode` | `none` ou `telegram` | `telegram` |
 | `bootstrap.command` | array de strings | opcional |
 | `bootstrap.timeout_seconds` | inteiro | `300`, 1–86400 |
 | `executor.timeout_seconds` | inteiro | `1800`, 1–86400 |
@@ -25,6 +26,11 @@ comando é um array `argv`; nenhum valor passa por `eval` ou shell implícito.
 | `instructions.executor/reviewer` | caminhos relativos | vazio, 256 KiB/arquivo |
 | `documentation.required` | booleano | `false` |
 | `documentation.required_paths` | templates relativos | vazio; `{task_id}`, `{task_slug}` |
+| `limits.output_bytes` | inteiro | 16 MiB combinados de stdout/stderr |
+| `limits.file_bytes` | inteiro | 64 MiB por arquivo |
+| `limits.memory_bytes` | inteiro | 4 GiB no cgroup |
+| `limits.tasks` | inteiro | 512 processos/threads no cgroup |
+| `limits.run_files` | inteiro | 512 arquivos no run |
 | `policy.missing_profile` | `allow` ou `deny` | `allow` |
 | `policy.terminate_grace_seconds` | inteiro | `5`, 1–300 |
 
@@ -45,10 +51,12 @@ comportamento, testes e riscos; o reviewer valida a precisão. Ausência bloquei
 o gate humano. O loop não edita documentação por heurística e não exige SHA ou
 URL de uma branch que ainda não existe.
 
-## Aprovação local
+## Aprovação local ou Telegram
 
-Após a decisão humana, o loop termina em `HUMAN_APPROVED` e preserva o
-worktree. Não cria index, commit, branch nem conexão Git remota.
+Com `approval.mode = "none"`, um review técnico válido termina em `APPROVED`,
+sem request/outbox Telegram. Com `telegram`, a decisão termina em
+`HUMAN_APPROVED`. Ambos preservam o worktree e exigem `verify` antes da
+integração manual. Nenhum modo cria index, commit, branch ou conexão Git remota.
 
 Use `agent-loop verify --run-dir ...` imediatamente antes da integração manual.
 Profiles com uma tabela `[delivery]` são recusados; remova a tabela inteira.
@@ -83,19 +91,31 @@ por arquivos temporários brutos antes da sanitização; uma morte abrupta do
 supervisor pode deixá-los no run directory. Proteja o state root contra outros
 usuários locais e inspecione/remova esses arquivos após uma interrupção anormal.
 
-## Timeout, grupo de processos e heartbeat
+## Timeout, scope systemd e heartbeat
 
-Cada fase inicia uma nova sessão/grupo. No timeout, o supervisor envia `SIGTERM`
-ao grupo, aguarda `policy.terminate_grace_seconds` e usa `SIGKILL` se necessário.
-O worktree permanece; o campo `failure` de `state.json` registra
+Cada fase exige um scope transitório `systemd --user`. No timeout, o supervisor
+envia `SIGTERM` a todo o cgroup, aguarda
+`policy.terminate_grace_seconds`, usa `SIGKILL` se necessário e confirma que o
+scope ficou inativo. Um descendente que crie outra sessão continua no cgroup. O
+worktree permanece; o campo `failure` de `state.json` registra
 `executor_timeout`, `reviewer_timeout`, `*_empty_report` etc., e o status fica
-`BLOCKED`. Saída vazia nunca é sucesso. O isolamento é por grupo de processos,
-não por cgroup: um descendente deliberado que crie outra sessão pode escapar
-desse encerramento.
+`BLOCKED`. Saída vazia nunca é sucesso. Sem acesso ao manager do usuário, a fase
+é recusada antes de executar o comando.
+
+O ambiente de cada fase também fixa `GIT_ALLOW_PROTOCOL=file` e
+`GIT_PROTOCOL_FROM_USER=0`. Operações locais continuam disponíveis, mas
+transportes Git remotos são recusados antes da rede. Isso não bloqueia outros
+clientes de rede e não amplia o modelo para repositórios hostis.
+
+`MemoryMax` e `TasksMax` são aplicados diretamente ao scope. `prlimit` fixa um
+limite hard de tamanho por arquivo para a árvore de processos. Stdout e stderr
+compartilham o orçamento de `limits.output_bytes`; ao excedê-lo, o scope é
+encerrado e o resultado registra `*_output_limit`. O número e tamanho dos
+artefatos do run são verificados antes de qualquer leitura/sanitização.
 
 Durante a fase, `heartbeat.json` é substituído atomicamente e uma linha segura
-mostra fase, iteração, elapsed, PID/PGID, última atividade, arquivos modificados
-e estado. Nenhum conteúdo ou ambiente entra no heartbeat.
+mostra fase, iteração, elapsed, PID, unidade systemd, última atividade, arquivos
+modificados e estado. Nenhum conteúdo ou ambiente entra no heartbeat.
 
 ## Máquina de estados de retomada
 
@@ -111,6 +131,7 @@ BLOCKED + --review-only -> nova revisão do snapshot atual
 BLOCKED/max_review_iterations + orçamento explícito -> executor em N+1
 AWAITING_HUMAN_APPROVAL -> apenas retoma wait-decision
 HUMAN_APPROVED          -> valida decisão/hash; não repete gate
+APPROVED + mode=none    -> valida manifesto/hash; não repete review
 ```
 
 ```bash
@@ -123,7 +144,8 @@ HUMAN_APPROVED          -> valida decisão/hash; não repete gate
 O wrapper mantém `.resume.lock` durante toda a retomada. Antes de iniciar,
 valida metadados, task no base commit, `HEAD`, repositório comum do worktree,
 perfil congelado e hash pré-revisão. Drift durante/depois da revisão ou no gate
-humano é recusado. Um `APPROVED` isolado sempre volta a uma nova revisão.
+humano é recusado. Em modo `telegram`, um `APPROVED` isolado volta a uma nova
+revisão; em modo `none`, ele só é terminal com manifesto técnico válido.
 
 ### Orçamento de iterações
 
@@ -152,9 +174,8 @@ começa em `N+1`. Alterar o orçamento, feedback ou snapshot rompe os bindings e
 impede a retomada quando a alteração atinge os campos vinculados. Os timestamps
 `authorized_at`/`updated_at` não participam do identificador determinístico, e
 os hashes não autenticam um adversário com o mesmo usuário capaz de reescrever
-artefatos e recalculá-los. O botão Telegram de extensão não faz parte do DX-04:
-fica como follow-up para evitar uma segunda superfície de autorização nesta
-entrega.
+artefatos e recalculá-los. Extensão por Telegram não existe: a autorização
+permanece exclusivamente na CLI para evitar uma segunda superfície.
 
 ## Evidência complementar
 
@@ -178,9 +199,9 @@ Anexar não altera status. Somente uma nova revisão pode abrir o gate humano.
   o state root contra adulteração deliberada por outro processo com o mesmo UID.
 - A unidade systemd atual escreve somente no state root e nunca executa Git para
   commit ou push.
-- Saída de subprocessos e snapshots grandes não possuem cota de disco/memória;
-  os arquivos brutos anteriores à sanitização podem sobreviver a uma morte
-  abrupta do supervisor.
+- Há cotas por saída, arquivo e quantidade de artefatos, mas não uma cota total
+  de disco acumulada entre runs/worktrees; arquivos brutos anteriores à
+  sanitização podem sobreviver a uma morte abrupta do supervisor.
 - Runs congelam o perfil serializado. Uma versão futura que altere defaults ou
   schema precisa de migração explícita para não tornar runs antigos incompatíveis.
 - Autenticação e políticas server-side do remote ficam integralmente no fluxo

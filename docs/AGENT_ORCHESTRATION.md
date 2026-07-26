@@ -9,8 +9,9 @@ task versionada
   → Codex revisa diff, aceite e testes
   → CHANGES_REQUESTED retorna ao Cursor (orçamento inicial de 1 a 5 ciclos)
   → APPROVED técnico
-  → AWAITING_HUMAN_APPROVAL
-  → HUMAN_APPROVED para o hash revisado
+  ├─ approval.mode=none → verificação local
+  └─ approval.mode=telegram → AWAITING_HUMAN_APPROVAL
+                              → HUMAN_APPROVED para o hash revisado
   → verificação manual antes de integrar
 ```
 
@@ -32,24 +33,24 @@ As credenciais das CLIs e do Telegram ficam fora do Git.
 Dry-run, sem criar worktree ou iniciar agentes:
 
 ```bash
-./agent-loop run --repo /projetos/alvo --dry-run docs/tasks/CP-00.md 3 main
+./agent-loop run --repo /projetos/alvo --dry-run docs/tasks/TASK-01.md 3 main
 ```
 
 Executar uma task versionada no `base-ref`:
 
 ```bash
-./agent-loop run --repo /projetos/alvo docs/tasks/CP-00.md 3 main
+./agent-loop run --repo /projetos/alvo docs/tasks/TASK-01.md 3 main
 ```
 
 Revisar mudanças já existentes no checkout atual:
 
 ```bash
-./agent-loop review --repo /projetos/alvo docs/tasks/CP-00.md
+./agent-loop review --repo /projetos/alvo docs/tasks/TASK-01.md
 ```
 
-As opções históricas `--ignore-orchestration` e `--evidence <arquivo>` continuam
-disponíveis para `review`. Evidência do executor é sempre tratada como não
-confiável e confrontada com o diff.
+As opções `--ignore-orchestration` e `--evidence <arquivo>` estão disponíveis
+para `review`. Evidência do executor é sempre tratada como não confiável e
+confrontada com o diff.
 
 ## Tool, target e state roots
 
@@ -74,17 +75,24 @@ Antes e depois da revisão, o runner calcula SHA-256 sobre:
 - tipo Git, bit executável e conteúdo de arquivos regulares;
 - bytes do destino de symlinks, sem seguir o link.
 
-Os hashes devem coincidir. `HUMAN_APPROVED` aprova esse hash imutável, mas não
-congela o worktree. Antes de integrar:
+Os hashes devem coincidir. `HUMAN_APPROVED` no modo `telegram` ou o manifesto
+técnico no modo `none` vincula esse hash imutável, mas não congela o worktree.
+Antes de integrar:
 
 ```bash
 ./agent-loop verify --run-dir /state/projects/<repo-id>/runs/<run-id>
 ```
 
-A verificação retorna sucesso somente quando há uma decisão humana válida, o
-status está em `HUMAN_APPROVED` e o hash atual ainda coincide.
+A verificação retorna sucesso quando há decisão humana válida em
+`HUMAN_APPROVED`, ou aceite técnico terminal em `APPROVED` com
+`approval.mode = "none"`, e o hash atual ainda coincide.
 
 ## Telegram
+
+Telegram é opcional. Selecione `[approval] mode = "telegram"` no perfil para
+usar esta seção. Sem a ponte ou durante indisponibilidade de rede, o run
+permanece em `AWAITING_HUMAN_APPROVAL`; `resume` apenas retoma a espera e nunca
+inventa uma decisão.
 
 Crie um arquivo externo, por exemplo
 `~/.config/codex-cursor-agent-loop/telegram.env`, com permissão `0600`:
@@ -121,7 +129,7 @@ pode duplicar updates ou mensagens.
 
 ```text
 (1/1)
-CP-00 — Proibir falso sucesso do adapter Noop
+TASK-01 — Descrição curta da mudança
 
 Resultado técnico: APPROVED
 Iteração: 2/3
@@ -137,8 +145,8 @@ Findings:
 - nenhum
 
 Documentação:
-- docs/env-variables.md
-- ROADMAP.md
+- README.md
+- docs/tasks/TASK-01.md
 
 [Aprovar alterações] [Rejeitar]
 ```
@@ -194,15 +202,18 @@ CLI explícita:
 Não há botão Telegram nesta versão. Isso evita autorização parcial sem o mesmo
 protocolo de `.resume.lock`, estado atômico e idempotência da CLI.
 
-Interrupções `INT`, `TERM` e `HUP` marcam runs ativos como `BLOCKED`, enviam
-notificação best-effort e preservam o worktree. O outbox usa identificador por
-mensagem para não consumir uma notificação substituída durante envio.
+Interrupções `INT`, `TERM` e `HUP` marcam runs ativos como `BLOCKED` e preservam
+o worktree. Quando Telegram está habilitado, também enfileiram uma notificação
+best-effort. O outbox usa identificador por mensagem para não consumir uma
+notificação substituída durante envio.
 
 ```text
-APPROVED → AWAITING_HUMAN_APPROVAL
-                    ├─ Rejeitar → BLOCKED
-                    └─ Aprovar  → HUMAN_APPROVED
-                                      └─ verify → integração Git manual
+APPROVED
+  ├─ mode=none     → verify → integração Git manual
+  └─ mode=telegram → AWAITING_HUMAN_APPROVAL
+                       ├─ Rejeitar → BLOCKED
+                       └─ Aprovar  → HUMAN_APPROVED
+                                         └─ verify → integração Git manual
 
 CHANGES_REQUESTED em N = limite
   → BLOCKED/max_review_iterations
@@ -218,11 +229,9 @@ worktree e executar conscientemente os comandos Git de integração/publicação
 
 ## Perfil, ambiente e retomada
 
-O contrato DX-02 está em [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md), com seu
-registro histórico em [`tasks/DX-02.md`](tasks/DX-02.md), incluindo schema TOML,
-bootstrap, ambiente externo `0600`, timeout por grupo de processos, heartbeat,
-`agent-loop resume` e `agent-loop evidence`. O histórico anterior permanece
-nas branches arquivadas e não integra o runtime v2.
+O contrato atual está em [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md), incluindo
+schema TOML, bootstrap, ambiente externo `0600`, timeout por scope
+`systemd --user`, heartbeat, `agent-loop resume` e `agent-loop evidence`.
 
 ## Limpeza
 

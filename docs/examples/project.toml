@@ -1,5 +1,8 @@
 schema_version = 1
 
+[approval]
+mode = "telegram"
+
 [bootstrap]
 command = ["bash", "scripts/agent-loop/bootstrap.sh"]
 timeout_seconds = 300
@@ -29,9 +32,16 @@ reviewer = [".agent-loop/reviewer.md"]
 [documentation]
 required = true
 required_paths = [
-  "ROADMAP.md",
+  "README.md",
   "docs/tasks/{task_id}.md",
 ]
+
+[limits]
+output_bytes = 16777216
+file_bytes = 67108864
+memory_bytes = 4294967296
+tasks = 512
+run_files = 512
 
 [policy]
 missing_profile = "deny"

@@ -60,6 +60,7 @@ from .state_machine import (
     StateTransitionError,
     transition_run,
 )
+from .systemd_scope import SystemdScopeError
 from .telegram import TelegramClient
 
 
@@ -222,6 +223,16 @@ def cmd_profile(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_approval_mode(args: argparse.Namespace) -> int:
+    try:
+        profile = _profile_for(args)
+    except ProfileError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    print(profile.approval_mode)
+    return 0
+
+
 def cmd_instructions(args: argparse.Namespace) -> int:
     try:
         repo = Path(args.repo).resolve()
@@ -263,6 +274,11 @@ def _run_profile_command(
             args.env_file if phase != "reviewer" else None,
             context=_runtime_context(args),
         )
+        # Git honors this restriction even when invoked by absolute path. Local
+        # repository operations remain available, while all network transports
+        # fail closed before contacting a remote.
+        environment["GIT_ALLOW_PROTOCOL"] = "file"
+        environment["GIT_PROTOCOL_FROM_USER"] = "0"
         for name, state in sorted(diagnostics.items()):
             print(f"[agent-loop] environment {name}={state}")
         secrets = {
@@ -282,10 +298,15 @@ def _run_profile_command(
             timeout_seconds=timeout,
             heartbeat_seconds=heartbeat,
             terminate_grace_seconds=profile.terminate_grace_seconds,
+            max_output_bytes=profile.output_limit_bytes,
+            max_file_bytes=profile.file_limit_bytes,
+            max_run_files=profile.run_file_limit,
+            memory_limit_bytes=profile.memory_limit_bytes,
+            task_limit=profile.task_limit,
             report_path=report,
             sanitize_artifacts=artifacts or (),
         )
-    except (OSError, ProfileError, ValueError) as exc:
+    except (OSError, ProfileError, SystemdScopeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
@@ -705,6 +726,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--repo", required=True)
     p.add_argument("--missing-policy", choices=("allow", "deny"), default="allow")
     p.set_defaults(func=cmd_profile)
+
+    p = sub.add_parser("approval-mode", help="Print the configured approval adapter")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--missing-policy", choices=("allow", "deny"), default="allow")
+    p.set_defaults(func=cmd_approval_mode)
 
     p = sub.add_parser("instructions", help="Read validated tracked phase instructions")
     p.add_argument("--repo", required=True)

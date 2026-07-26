@@ -8,8 +8,8 @@ usage() {
     "Usage: scripts/agents/run_task.sh [--dry-run] [--env-file <path>] <task-file> [max-iterations] [base-ref]" \
     "" \
     "Example:" \
-    "  scripts/agents/run_task.sh docs/tasks/CP-00.md 3 main" \
-    "  scripts/agents/run_task.sh --dry-run docs/tasks/LC-01.md 3 HEAD"
+    "  scripts/agents/run_task.sh docs/tasks/TASK-01.md 3 main" \
+    "  scripts/agents/run_task.sh --dry-run docs/tasks/TASK-01.md 3 HEAD"
 }
 
 die() {
@@ -35,6 +35,9 @@ notify_terminal_failure() {
   local reason="$1"
   local report_hint="${2:-}"
   local kind="${3:-blocked}"
+  if [[ "${APPROVAL_MODE:-telegram}" == "none" ]]; then
+    return 0
+  fi
   if [[ -z "${RUN_DIR:-}" || ! -d "${RUN_DIR:-}" ]]; then
     return 0
   fi
@@ -248,6 +251,7 @@ _run_task_entry() {
   ENV_FILE="${AGENT_LOOP_ENV_FILE:-}"
   RESUME_RUN_DIR=""
   REVIEW_ONLY=0
+  APPROVAL_MODE=""
   PROFILE_MISSING_POLICY="allow"
   TOOL_ROOT="${AGENT_LOOP_TOOL_ROOT:-$AGENT_LOOP_SCRIPT_TOOL_ROOT}"
   while [[ "${1:-}" == --* ]]; do
@@ -308,6 +312,10 @@ _run_task_entry() {
     die "$TASK_FILE is not tracked in base $BASE_COMMIT; commit the planner task first"
   DX_CLI profile --repo "$REPO_ROOT" --missing-policy "$PROFILE_MISSING_POLICY" >/dev/null || \
     die "invalid or required .agent-loop/project.toml"
+  if [[ -n "$RESUME_RUN_DIR" ]]; then
+    APPROVAL_MODE="$(DX_CLI approval-mode --repo "$WORKTREE" --missing-policy "$PROFILE_MISSING_POLICY")" || \
+      die "invalid frozen approval mode"
+  fi
 
   if [[ -n "$RESUME_RUN_DIR" && "$START_PHASE" == "complete" ]]; then
     DX_CLI verify-reviewed-snapshot --run-dir "$RUN_DIR" >/dev/null || \
@@ -395,6 +403,8 @@ _run_task_entry() {
     RUN_DIR="$(allocate_exclusive_run_dir "$STATE_ROOT/runs" "$TASK_SLUG")"
     note "creating isolated worktree at $WORKTREE"
     git worktree add --detach "$WORKTREE" "$BASE_COMMIT"
+    APPROVAL_MODE="$(DX_CLI approval-mode --repo "$WORKTREE" --missing-policy "$PROFILE_MISSING_POLICY")" || \
+      die "invalid approval mode in base commit"
     transition_run_state "run_started"
     trap 'handle_loop_signal INT 130' INT
     trap 'handle_loop_signal TERM 143' TERM
@@ -429,7 +439,9 @@ _run_task_entry() {
     BOOTSTRAP_EXIT=$?
     set -e
     if [[ "$BOOTSTRAP_EXIT" -ne 0 ]]; then
-      if [[ "$BOOTSTRAP_EXIT" -eq 124 ]]; then BOOTSTRAP_REASON="bootstrap_timeout"; else BOOTSTRAP_REASON="bootstrap_failed"; fi
+      if [[ "$BOOTSTRAP_EXIT" -eq 124 ]]; then BOOTSTRAP_REASON="bootstrap_timeout";
+      elif [[ "$BOOTSTRAP_EXIT" -eq 125 ]]; then BOOTSTRAP_REASON="bootstrap_resource_limit";
+      else BOOTSTRAP_REASON="bootstrap_failed"; fi
       block_run "Project bootstrap failed with exit $BOOTSTRAP_EXIT" bootstrap "bootstrap.log" "$BOOTSTRAP_REASON"
       die "project bootstrap failed; worktree preserved at $WORKTREE"
     fi
@@ -473,6 +485,7 @@ _run_task_entry() {
     set -e
       if [[ "$CURSOR_EXIT" -ne 0 || ! -s "$EXECUTOR_REPORT" ]]; then
         if [[ "$CURSOR_EXIT" -eq 124 ]]; then CURSOR_REASON="executor_timeout"; \
+        elif [[ "$CURSOR_EXIT" -eq 125 ]]; then CURSOR_REASON="executor_resource_limit"; \
         elif [[ ! -s "$EXECUTOR_REPORT" ]]; then CURSOR_REASON="executor_empty_report"; \
         else CURSOR_REASON="executor_failed"; fi
         block_run "Cursor Agent failed with exit $CURSOR_EXIT" executor "$(basename "$EXECUTOR_REPORT")" "$CURSOR_REASON"
@@ -499,7 +512,9 @@ _run_task_entry() {
       VALIDATION_EXIT=$?
       set -e
       if [[ "$VALIDATION_EXIT" -ne 0 ]]; then
-        if [[ "$VALIDATION_EXIT" -eq 124 ]]; then VALIDATION_REASON="validation_timeout"; else VALIDATION_REASON="validation_failed"; fi
+        if [[ "$VALIDATION_EXIT" -eq 124 ]]; then VALIDATION_REASON="validation_timeout";
+        elif [[ "$VALIDATION_EXIT" -eq 125 ]]; then VALIDATION_REASON="validation_resource_limit";
+        else VALIDATION_REASON="validation_failed"; fi
         block_run "Configured validation failed with exit $VALIDATION_EXIT" validation "validation.log" "$VALIDATION_REASON"
         die "configured validation failed; worktree preserved at $WORKTREE"
       fi
@@ -556,6 +571,7 @@ _run_task_entry() {
     set -e
     if [[ "$CODEX_EXIT" -ne 0 || ! -s "$REVIEW_CANDIDATE" ]]; then
       if [[ "$CODEX_EXIT" -eq 124 ]]; then CODEX_REASON="reviewer_timeout"; \
+      elif [[ "$CODEX_EXIT" -eq 125 ]]; then CODEX_REASON="reviewer_resource_limit"; \
       elif [[ ! -s "$REVIEW_CANDIDATE" ]]; then CODEX_REASON="reviewer_empty_report"; \
       else CODEX_REASON="reviewer_failed"; fi
       block_run "Codex review failed with exit $CODEX_EXIT" reviewer "$(basename "$REVIEW_CANDIDATE")" "$CODEX_REASON"
@@ -593,8 +609,8 @@ _run_task_entry() {
     if [[ "$STATUS_RC" -ne 0 ]]; then STATUS="INVALID"; fi
     case "$STATUS" in
       APPROVED)
-        # Technical APPROVED is not human approval; open the Telegram gate on the
-        # content-addressed reviewed snapshot hash (before == after Codex).
+        # Freeze the content-addressed reviewed snapshot before either completing
+        # locally or opening the optional Telegram adapter.
         if ! DX_CLI prepare-review-artifacts \
           --run-dir "$RUN_DIR" --repo "$REPO_ROOT" --worktree "$WORKTREE" \
           --task-file "$TASK_FILE" --task-id "$TASK_ID" --task-slug "$TASK_SLUG" \
@@ -602,9 +618,19 @@ _run_task_entry() {
           --max-iterations "$MAX_ITERATIONS" --executor-report "$EXECUTOR_REPORT" \
           --reviewer-report "$REVIEW_FILE" --reviewed-hash "$AFTER_HASH" \
           >/dev/null; then
-          block_run "Failed to freeze reviewed manifest and Telegram summary" reviewer \
+          block_run "Failed to freeze reviewed manifest and technical summary" reviewer \
             "$(basename "$REVIEW_FILE")" review_artifacts_invalid
-          die "review artifacts are invalid; human approval gate was not opened"
+          die "review artifacts are invalid; approval was not finalized"
+        fi
+        if [[ "$APPROVAL_MODE" == "none" ]]; then
+          transition_run_state "review_approved"
+          DX_CLI verify-reviewed-snapshot --run-dir "$RUN_DIR" >/dev/null || \
+            die "terminal reviewed snapshot verification failed"
+          note "technical APPROVED finalized locally; Telegram is disabled"
+          note "reviewed diff_hash=${AFTER_HASH}"
+          note "no commit or push was attempted; integrate the preserved worktree manually"
+          note "worktree preserved: $WORKTREE"
+          exit 0
         fi
         await_human_approval "$REVIEW_FILE" "$AFTER_HASH"
         ;;

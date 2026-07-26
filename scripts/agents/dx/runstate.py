@@ -17,6 +17,7 @@ from .approval import (
     read_status,
     utc_now_iso,
     validate_decision_matches_request,
+    verify_reviewed_snapshot,
 )
 from .atomic import atomic_write_json, read_json, run_scoped_lock
 from .profile import ProfileError, load_project_profile
@@ -590,12 +591,21 @@ def plan_resume(run_dir: Path, *, review_only: bool = False) -> dict[str, Any]:
             raise RunStateError("worktree changed after reviewed approval request")
         phase = "awaiting_human"
     elif status == "APPROVED":
-        # A bare technical approval is not resumable into the human gate. Run a
-        # fresh reviewer so copied/standalone reports can never promote state.
-        snapshot = _review_hash(run_dir, iteration)
-        if snapshot and compute_diff_hash(worktree, base) != snapshot:
-            raise RunStateError("worktree changed after technical review")
-        phase = "reviewer"
+        profile = metadata.get("profile")
+        approval = profile.get("approval") if isinstance(profile, dict) else None
+        if isinstance(approval, dict) and approval.get("mode") == "none":
+            verification = verify_reviewed_snapshot(run_dir)
+            if not verification["matches"]:
+                raise RunStateError("worktree changed after terminal technical approval")
+            phase = "complete"
+        else:
+            # In Telegram mode a bare technical approval is not resumable into
+            # the human gate. Run a fresh reviewer so copied/standalone reports
+            # can never promote state.
+            snapshot = _review_hash(run_dir, iteration)
+            if snapshot and compute_diff_hash(worktree, base) != snapshot:
+                raise RunStateError("worktree changed after technical review")
+            phase = "reviewer"
     elif status == "CHANGES_REQUESTED":
         snapshot = _review_hash(run_dir, iteration)
         if snapshot and compute_diff_hash(worktree, base) != snapshot:

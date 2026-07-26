@@ -42,7 +42,7 @@ from dx.runstate import (  # noqa: E402
     plan_resume,
     write_run_metadata,
 )
-from dx.runtime import TIMEOUT_EXIT, supervise_command  # noqa: E402
+from dx.runtime import RESOURCE_LIMIT_EXIT, TIMEOUT_EXIT, supervise_command  # noqa: E402
 from dx.state_machine import RunEvent, transition_run  # noqa: E402
 from dx.telegram import FakeTelegramAPI, TelegramClient  # noqa: E402
 
@@ -122,6 +122,12 @@ def test_project_profile_parses_complete_schema(tmp_path: Path) -> None:
         [instructions]
         executor = [".agent-loop/executor-extra.md"]
         reviewer = [".agent-loop/reviewer-extra.md"]
+        [limits]
+        output_bytes = 1048576
+        file_bytes = 2097152
+        memory_bytes = 268435456
+        tasks = 64
+        run_files = 128
         [policy]
         missing_profile = "deny"
         terminate_grace_seconds = 4
@@ -133,6 +139,9 @@ def test_project_profile_parses_complete_schema(tmp_path: Path) -> None:
     assert profile.reviewer_heartbeat_seconds == 3
     assert profile.required_environment == ("TEST_DATABASE_URL", "POSTGRES_ADMIN_DATABASE_URL")
     assert profile.validation_commands[-1] == ("git", "diff", "--check")
+    assert profile.output_limit_bytes == 1048576
+    assert profile.memory_limit_bytes == 268435456
+    assert profile.task_limit == 64
     assert profile.missing_profile == "deny"
 
 
@@ -145,6 +154,7 @@ def test_project_profile_parses_complete_schema(tmp_path: Path) -> None:
         'schema_version = 1\n[environment]\nrequired = ["BAD-NAME"]\n',
         'schema_version = 1\n[instructions]\nexecutor = ["../secret"]\n',
         'schema_version = 1\n[bootstrap]\ncommand = "bash unsafe"\n',
+        "schema_version = 1\n[limits]\noutput_bytes = 1\n",
     ],
 )
 def test_project_profile_rejects_unknown_or_unsafe_configuration(
@@ -346,6 +356,86 @@ def test_supervisor_emits_periodic_safe_heartbeat(tmp_path: Path, capsys: pytest
     assert "pid=" in output and "changed_files=" in output and "last_activity=" in output
     heartbeat = json.loads((run_dir / "heartbeat.json").read_text())
     assert heartbeat["state"] == "completed"
+
+
+def test_supervisor_caps_combined_output_and_records_resource_limit(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    subprocess.run(["git", "init", str(worktree)], check=True, capture_output=True)
+    run_dir = tmp_path / "run"
+    result = supervise_command(
+        command=[
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.write('x' * 200000); sys.stderr.write('y' * 200000)",
+        ],
+        phase="executor",
+        iteration=1,
+        cwd=worktree,
+        run_dir=run_dir,
+        environment={"PATH": os.environ["PATH"]},
+        secret_values={},
+        timeout_seconds=5,
+        heartbeat_seconds=1,
+        terminate_grace_seconds=1,
+        max_output_bytes=64 * 1024,
+    )
+
+    assert result == RESOURCE_LIMIT_EXIT
+    payload = json.loads((run_dir / "executor-1-result.json").read_text())
+    assert payload["reason"] == "executor_output_limit"
+    assert payload["captured_output_bytes"] == 64 * 1024
+    assert (run_dir / "executor-1.log").stat().st_size <= 64 * 1024 + 1
+
+
+def test_supervisor_enforces_file_size_and_run_file_count(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    subprocess.run(["git", "init", str(worktree)], check=True, capture_output=True)
+    run_dir = tmp_path / "run"
+    target = worktree / "oversized.bin"
+    result = supervise_command(
+        command=[
+            sys.executable,
+            "-c",
+            f"open({str(target)!r}, 'wb').write(b'x' * 200000)",
+        ],
+        phase="executor",
+        iteration=1,
+        cwd=worktree,
+        run_dir=run_dir,
+        environment={"PATH": os.environ["PATH"]},
+        secret_values={},
+        timeout_seconds=5,
+        heartbeat_seconds=1,
+        terminate_grace_seconds=1,
+        max_file_bytes=64 * 1024,
+    )
+    assert result != 0
+    assert target.stat().st_size <= 64 * 1024
+
+    for index in range(3):
+        (run_dir / f"extra-{index}.json").write_text("{}\n", encoding="utf-8")
+    limited = supervise_command(
+        command=["true"],
+        phase="validation",
+        iteration=1,
+        cwd=worktree,
+        run_dir=run_dir,
+        environment={"PATH": os.environ["PATH"]},
+        secret_values={},
+        timeout_seconds=5,
+        heartbeat_seconds=1,
+        terminate_grace_seconds=1,
+        max_run_files=3,
+    )
+    assert limited == RESOURCE_LIMIT_EXIT
+    payload = json.loads((run_dir / "validation-1-result.json").read_text())
+    assert payload["reason"] == "run_artifact_file_count"
 
 
 def test_reviewer_timeout_is_structured_and_incomplete_json_is_rejected(tmp_path: Path) -> None:
