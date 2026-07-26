@@ -35,6 +35,9 @@ notify_terminal_failure() {
   local reason="$1"
   local report_hint="${2:-}"
   local kind="${3:-blocked}"
+  if [[ "${APPROVAL_MODE:-telegram}" == "none" ]]; then
+    return 0
+  fi
   if [[ -z "${RUN_DIR:-}" || ! -d "${RUN_DIR:-}" ]]; then
     return 0
   fi
@@ -248,6 +251,7 @@ _run_task_entry() {
   ENV_FILE="${AGENT_LOOP_ENV_FILE:-}"
   RESUME_RUN_DIR=""
   REVIEW_ONLY=0
+  APPROVAL_MODE=""
   PROFILE_MISSING_POLICY="allow"
   TOOL_ROOT="${AGENT_LOOP_TOOL_ROOT:-$AGENT_LOOP_SCRIPT_TOOL_ROOT}"
   while [[ "${1:-}" == --* ]]; do
@@ -308,6 +312,10 @@ _run_task_entry() {
     die "$TASK_FILE is not tracked in base $BASE_COMMIT; commit the planner task first"
   DX_CLI profile --repo "$REPO_ROOT" --missing-policy "$PROFILE_MISSING_POLICY" >/dev/null || \
     die "invalid or required .agent-loop/project.toml"
+  if [[ -n "$RESUME_RUN_DIR" ]]; then
+    APPROVAL_MODE="$(DX_CLI approval-mode --repo "$WORKTREE" --missing-policy "$PROFILE_MISSING_POLICY")" || \
+      die "invalid frozen approval mode"
+  fi
 
   if [[ -n "$RESUME_RUN_DIR" && "$START_PHASE" == "complete" ]]; then
     DX_CLI verify-reviewed-snapshot --run-dir "$RUN_DIR" >/dev/null || \
@@ -395,6 +403,8 @@ _run_task_entry() {
     RUN_DIR="$(allocate_exclusive_run_dir "$STATE_ROOT/runs" "$TASK_SLUG")"
     note "creating isolated worktree at $WORKTREE"
     git worktree add --detach "$WORKTREE" "$BASE_COMMIT"
+    APPROVAL_MODE="$(DX_CLI approval-mode --repo "$WORKTREE" --missing-policy "$PROFILE_MISSING_POLICY")" || \
+      die "invalid approval mode in base commit"
     transition_run_state "run_started"
     trap 'handle_loop_signal INT 130' INT
     trap 'handle_loop_signal TERM 143' TERM
@@ -599,8 +609,8 @@ _run_task_entry() {
     if [[ "$STATUS_RC" -ne 0 ]]; then STATUS="INVALID"; fi
     case "$STATUS" in
       APPROVED)
-        # Technical APPROVED is not human approval; open the Telegram gate on the
-        # content-addressed reviewed snapshot hash (before == after Codex).
+        # Freeze the content-addressed reviewed snapshot before either completing
+        # locally or opening the optional Telegram adapter.
         if ! DX_CLI prepare-review-artifacts \
           --run-dir "$RUN_DIR" --repo "$REPO_ROOT" --worktree "$WORKTREE" \
           --task-file "$TASK_FILE" --task-id "$TASK_ID" --task-slug "$TASK_SLUG" \
@@ -608,9 +618,19 @@ _run_task_entry() {
           --max-iterations "$MAX_ITERATIONS" --executor-report "$EXECUTOR_REPORT" \
           --reviewer-report "$REVIEW_FILE" --reviewed-hash "$AFTER_HASH" \
           >/dev/null; then
-          block_run "Failed to freeze reviewed manifest and Telegram summary" reviewer \
+          block_run "Failed to freeze reviewed manifest and technical summary" reviewer \
             "$(basename "$REVIEW_FILE")" review_artifacts_invalid
-          die "review artifacts are invalid; human approval gate was not opened"
+          die "review artifacts are invalid; approval was not finalized"
+        fi
+        if [[ "$APPROVAL_MODE" == "none" ]]; then
+          transition_run_state "review_approved"
+          DX_CLI verify-reviewed-snapshot --run-dir "$RUN_DIR" >/dev/null || \
+            die "terminal reviewed snapshot verification failed"
+          note "technical APPROVED finalized locally; Telegram is disabled"
+          note "reviewed diff_hash=${AFTER_HASH}"
+          note "no commit or push was attempted; integrate the preserved worktree manually"
+          note "worktree preserved: $WORKTREE"
+          exit 0
         fi
         await_human_approval "$REVIEW_FILE" "$AFTER_HASH"
         ;;

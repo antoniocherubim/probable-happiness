@@ -627,15 +627,55 @@ def verify_reviewed_snapshot(run_dir: Path) -> dict[str, Any]:
     """
     Mandatory pre-integration check for the planner.
 
-    Recomputes the live worktree hash and compares it to the reviewed
-    ``diff_hash`` recorded in the request (and decision, when present).
-    ``HUMAN_APPROVED`` means the operator approved that immutable hash; this
-    command detects post-approval worktree drift before integration.
+    Recomputes the live worktree hash and compares it to the frozen reviewed
+    hash. Telegram mode binds it through the request and human decision. With
+    ``approval.mode = "none"``, technical ``APPROVED`` binds it through the
+    reviewed manifest written before the terminal transition.
     """
     run_dir = Path(run_dir)
+    status = read_status(run_dir)
+    if status == STATUS_APPROVED:
+        state = read_state_document(run_dir)
+        metadata = state.get("metadata") if state else None
+        profile = metadata.get("profile") if isinstance(metadata, dict) else None
+        approval = profile.get("approval") if isinstance(profile, dict) else None
+        if not isinstance(approval, dict) or approval.get("mode") != "none":
+            raise ApprovalError("technical APPROVED is terminal only when approval.mode is none")
+        manifest_path = run_dir / "reviewed_manifest.json"
+        try:
+            manifest = read_json(manifest_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise ApprovalError(f"reviewed manifest missing or invalid: {exc}") from exc
+        expected = manifest.get("snapshot_hash")
+        worktree_value = metadata.get("worktree")
+        base_commit = str(metadata.get("base_commit", ""))
+        if (
+            manifest.get("schema_version") != SCHEMA_VERSION
+            or manifest.get("base_commit") != base_commit
+            or not isinstance(expected, str)
+            or len(expected) < 32
+            or not isinstance(worktree_value, str)
+        ):
+            raise ApprovalError("reviewed manifest does not match run metadata")
+        worktree = Path(worktree_value)
+        current = compute_diff_hash(worktree, base_commit)
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "run_id": run_dir.name,
+            "reviewed_diff_hash": expected,
+            "current_diff_hash": current,
+            "matches": current == expected,
+            "status": status,
+            "approval_mode": "none",
+            "worktree": str(worktree),
+            "base_commit": base_commit,
+        }
+
+    if status != STATUS_HUMAN_APPROVED:
+        raise ApprovalError(
+            "run is not HUMAN_APPROVED or terminal technical APPROVED"
+        )
     request = load_request(run_dir)
-    if read_status(run_dir) != STATUS_HUMAN_APPROVED:
-        raise ApprovalError("run is not HUMAN_APPROVED")
     decision = load_decision(run_dir)
     if decision is None:
         raise ApprovalError("human approval decision missing")
@@ -657,7 +697,8 @@ def verify_reviewed_snapshot(run_dir: Path) -> dict[str, Any]:
         "reviewed_diff_hash": expected,
         "current_diff_hash": current,
         "matches": matches,
-        "status": read_status(run_dir),
+        "status": status,
+        "approval_mode": "telegram",
         "worktree": str(worktree),
         "base_commit": base_commit,
     }

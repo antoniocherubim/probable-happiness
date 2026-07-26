@@ -16,6 +16,7 @@ PROFILE_RELATIVE_PATH = Path(".agent-loop/project.toml")
 PROFILE_SCHEMA_VERSION = 1
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SAFE_SECTIONS = {
+    "approval": {"mode"},
     "bootstrap": {"command", "timeout_seconds"},
     "executor": {"timeout_seconds", "heartbeat_seconds"},
     "reviewer": {"timeout_seconds", "heartbeat_seconds"},
@@ -62,6 +63,7 @@ class ProfileError(ValueError):
 @dataclass(frozen=True)
 class ProjectProfile:
     path: Path | None = None
+    approval_mode: str = "telegram"
     bootstrap_command: tuple[str, ...] | None = None
     bootstrap_timeout_seconds: int = 300
     executor_timeout_seconds: int = 1800
@@ -87,6 +89,7 @@ class ProjectProfile:
         return {
             "schema_version": PROFILE_SCHEMA_VERSION,
             "profile_path": str(self.path) if self.path else None,
+            "approval": {"mode": self.approval_mode},
             "bootstrap": {
                 "command": list(self.bootstrap_command) if self.bootstrap_command else None,
                 "timeout_seconds": self.bootstrap_timeout_seconds,
@@ -223,6 +226,7 @@ def load_project_profile(repo: Path | str, *, missing_policy: str = "allow") -> 
         raise ProfileError(f"schema_version must be {PROFILE_SCHEMA_VERSION}")
 
     bootstrap = _table(data, "bootstrap")
+    approval = _table(data, "approval")
     executor = _table(data, "executor")
     reviewer = _table(data, "reviewer")
     environment = _table(data, "environment")
@@ -234,6 +238,9 @@ def load_project_profile(repo: Path | str, *, missing_policy: str = "allow") -> 
     configured_missing = policy.get("missing_profile", "allow")
     if configured_missing not in {"allow", "deny"}:
         raise ProfileError("policy.missing_profile must be 'allow' or 'deny'")
+    approval_mode = approval.get("mode", "telegram")
+    if approval_mode not in {"none", "telegram"}:
+        raise ProfileError("approval.mode must be 'none' or 'telegram'")
     documentation_required = documentation.get("required", False)
     if type(documentation_required) is not bool:
         raise ProfileError("documentation.required must be a boolean")
@@ -253,6 +260,7 @@ def load_project_profile(repo: Path | str, *, missing_policy: str = "allow") -> 
         raise ProfileError("documentation.required needs at least one required_paths entry")
     return ProjectProfile(
         path=path,
+        approval_mode=approval_mode,
         bootstrap_command=_command(bootstrap.get("command"), "bootstrap.command", optional=True),
         bootstrap_timeout_seconds=_bounded_int(
             bootstrap.get("timeout_seconds"), "bootstrap.timeout_seconds", 300
