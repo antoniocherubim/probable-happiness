@@ -23,6 +23,7 @@ from .approval import (
 from .bridge import Bridge, build_awaiting_summary, build_blocked_summary
 from .config import ConfigError, human_approval_timeout_sec, load_bridge_config
 from .atomic import atomic_write_json
+from .integration import IntegrationError, integrate_reviewed_snapshot
 from .paths import (
     PathConfigError,
     default_state_root,
@@ -207,6 +208,20 @@ def cmd_verify_reviewed_snapshot(args: argparse.Namespace) -> int:
         return 1
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result.get("matches") else 2
+
+
+def cmd_integrate_reviewed_snapshot(args: argparse.Namespace) -> int:
+    """Integrate an approved snapshot into the current local branch."""
+    try:
+        result = integrate_reviewed_snapshot(
+            Path(args.run_dir),
+            message=args.message,
+        )
+    except (IntegrationError, OSError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
 
 
 def _profile_for(args: argparse.Namespace) -> ProjectProfile:
@@ -716,6 +731,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--run-dir", required=True)
     p.set_defaults(func=cmd_verify_reviewed_snapshot)
+
+    p = sub.add_parser(
+        "integrate-reviewed-snapshot",
+        help=(
+            "Commit the approved snapshot and fast-forward the current "
+            "local branch"
+        ),
+    )
+    p.add_argument("--run-dir", required=True)
+    p.add_argument("--message", default=None)
+    p.set_defaults(func=cmd_integrate_reviewed_snapshot)
 
     p = sub.add_parser("serve", help="Long-poll Telegram bridge")
     p.add_argument("--runs-root", default=None)

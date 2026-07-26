@@ -90,18 +90,20 @@ não é imposta pelo processo. A ponte descobre runs de múltiplos projetos. O
 Telegram envia o resumo técnico em partes numeradas; somente a última contém os
 botões **Aprovar alterações** e **Rejeitar**. A aprovação registra apenas
 `HUMAN_APPROVED`; não cria job, commit ou branch e não acessa a rede Git.
-Antes de integrar manualmente, valide novamente decisão e snapshot:
+Para integrar o snapshot aprovado na branch local atualmente selecionada:
 
 ```bash
-./agent-loop verify --run-dir /caminho/externo/para/o/run
+./agent-loop integrate --run-dir /caminho/externo/para/o/run
 ```
 
-O comando falha se o modo configurado não tiver seu aceite válido ou se o
-worktree divergir do hash revisado.
-
-Depois da verificação, inspecione o worktree preservado e execute
-`git add`/`commit`/`push` conscientemente no seu fluxo normal. Esses comandos
-não são executados pelo runner.
+`integrate` verifica novamente decisão, manifesto e hash; exige checkout limpo
+na branch cujo `HEAD` ainda é o commit-base; cria o commit a partir dos bytes
+revisados em um index temporário; desativa hooks e faz somente fast-forward
+local. O diff completo, incluindo arquivos antes não rastreados, passa por
+`git diff --check` antes da atualização. O comando é idempotente, preserva o
+worktree de auditoria e nunca
+executa fetch, pull, push ou qualquer transporte Git. A publicação remota
+continua manual. `verify` permanece disponível como inspeção sem mutação.
 
 ## Extensão explícita de iterações
 

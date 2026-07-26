@@ -77,7 +77,7 @@ Antes e depois da revisão, o runner calcula SHA-256 sobre:
 
 Os hashes devem coincidir. `HUMAN_APPROVED` no modo `telegram` ou o manifesto
 técnico no modo `none` vincula esse hash imutável, mas não congela o worktree.
-Antes de integrar:
+Para uma verificação somente-leitura:
 
 ```bash
 ./agent-loop verify --run-dir /state/projects/<repo-id>/runs/<run-id>
@@ -86,6 +86,19 @@ Antes de integrar:
 A verificação retorna sucesso quando há decisão humana válida em
 `HUMAN_APPROVED`, ou aceite técnico terminal em `APPROVED` com
 `approval.mode = "none"`, e o hash atual ainda coincide.
+
+Para criar o commit e avançar a branch local que ainda aponta exatamente para
+o commit-base:
+
+```bash
+./agent-loop integrate --run-dir /state/projects/<repo-id>/runs/<run-id>
+```
+
+O integrador recompõe o commit pelo manifesto em um index temporário, desativa
+hooks, verifica whitespace no diff completo e permite apenas fast-forward
+local. Checkout sujo, drift, base
+divergente, manifesto adulterado ou ausência de aprovação abortam sem alterar
+a branch. Nenhum remoto é consultado ou modificado; push permanece manual.
 
 ## Telegram
 

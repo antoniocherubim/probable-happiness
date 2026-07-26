@@ -55,10 +55,19 @@ URL de uma branch que ainda não existe.
 
 Com `approval.mode = "none"`, um review técnico válido termina em `APPROVED`,
 sem request/outbox Telegram. Com `telegram`, a decisão termina em
-`HUMAN_APPROVED`. Ambos preservam o worktree e exigem `verify` antes da
-integração manual. Nenhum modo cria index, commit, branch ou conexão Git remota.
+`HUMAN_APPROVED`. Ambos preservam o worktree. A integração é uma ação local
+explícita e separada:
 
-Use `agent-loop verify --run-dir ...` imediatamente antes da integração manual.
+```bash
+agent-loop integrate --run-dir /state/projects/<repo-id>/runs/<run-id>
+```
+
+O comando exige aprovação válida, snapshot intacto, manifesto correspondente,
+checkout limpo e `HEAD` no commit-base; então cria um commit pelo index
+temporário e faz fast-forward com hooks desativados. Não há fetch, pull, push,
+branch remota ou conexão Git. `agent-loop verify --run-dir ...` permanece como
+checagem somente-leitura.
+
 Profiles com uma tabela `[delivery]` são recusados; remova a tabela inteira.
 
 ## Bootstrap e ambiente
