@@ -3,6 +3,12 @@
 Runner externo para executar uma task com Cursor Agent, revisar o resultado com
 Codex e exigir aprovação humana auditável pelo Telegram.
 
+O desenvolvimento ativo está sendo reorganizado como
+[Personal Core v2](docs/PERSONAL_CORE_V2.md): um núcleo menor, exclusivamente
+local e voltado ao uso pessoal. A linha anterior foi congelada na branch
+`personal-stable`; seus mecanismos de transactions, migrations e audit trail
+não serão levados automaticamente para o novo núcleo.
+
 Projetos consumidores podem declarar bootstrap, ambiente allowlisted, timeouts,
 heartbeat, validações e documentação obrigatória em
 `.agent-loop/project.toml`. Runs interrompidos
@@ -13,9 +19,8 @@ As mudanças de estado passam por uma tabela tipada e compare-and-set sob
 `.state.lock`; eventos inválidos falham sem substituir o estado anterior.
 Estados históricos de delivery são somente leitura e não voltam ao fluxo ativo.
 
-O projeto ainda está em estágio pré-alpha. O caminho até uma distribuição
-confiável para terceiros, com gates objetivos de segurança, CI, empacotamento e
-release, está no [roadmap](ROADMAP.md).
+O projeto não busca distribuição para terceiros nesta linha. O roadmap público
+é histórico e não orienta mais as tasks do Personal Core.
 
 O runner não faz commit, push, merge, tag, PR ou deploy. Após a aprovação humana,
 ele preserva o worktree e o hash revisado para integração Git manual. O profile
