@@ -144,7 +144,8 @@ APPROVED + mode=none    -> valida manifesto/hash; não repete review
 O wrapper mantém `.resume.lock` durante toda a retomada. Antes de iniciar,
 valida metadados, task no base commit, `HEAD`, repositório comum do worktree,
 perfil congelado e hash pré-revisão. Drift durante/depois da revisão ou no gate
-humano é recusado. Um `APPROVED` isolado sempre volta a uma nova revisão.
+humano é recusado. Em modo `telegram`, um `APPROVED` isolado volta a uma nova
+revisão; em modo `none`, ele só é terminal com manifesto técnico válido.
 
 ### Orçamento de iterações
 
@@ -173,9 +174,8 @@ começa em `N+1`. Alterar o orçamento, feedback ou snapshot rompe os bindings e
 impede a retomada quando a alteração atinge os campos vinculados. Os timestamps
 `authorized_at`/`updated_at` não participam do identificador determinístico, e
 os hashes não autenticam um adversário com o mesmo usuário capaz de reescrever
-artefatos e recalculá-los. O botão Telegram de extensão não faz parte do DX-04:
-fica como follow-up para evitar uma segunda superfície de autorização nesta
-entrega.
+artefatos e recalculá-los. Extensão por Telegram não existe: a autorização
+permanece exclusivamente na CLI para evitar uma segunda superfície.
 
 ## Evidência complementar
 
@@ -199,9 +199,9 @@ Anexar não altera status. Somente uma nova revisão pode abrir o gate humano.
   o state root contra adulteração deliberada por outro processo com o mesmo UID.
 - A unidade systemd atual escreve somente no state root e nunca executa Git para
   commit ou push.
-- Saída de subprocessos e snapshots grandes não possuem cota de disco/memória;
-  os arquivos brutos anteriores à sanitização podem sobreviver a uma morte
-  abrupta do supervisor.
+- Há cotas por saída, arquivo e quantidade de artefatos, mas não uma cota total
+  de disco acumulada entre runs/worktrees; arquivos brutos anteriores à
+  sanitização podem sobreviver a uma morte abrupta do supervisor.
 - Runs congelam o perfil serializado. Uma versão futura que altere defaults ou
   schema precisa de migração explícita para não tornar runs antigos incompatíveis.
 - Autenticação e políticas server-side do remote ficam integralmente no fluxo

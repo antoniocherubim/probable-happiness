@@ -8,8 +8,8 @@ usage() {
     "Usage: scripts/agents/run_task.sh [--dry-run] [--env-file <path>] <task-file> [max-iterations] [base-ref]" \
     "" \
     "Example:" \
-    "  scripts/agents/run_task.sh docs/tasks/CP-00.md 3 main" \
-    "  scripts/agents/run_task.sh --dry-run docs/tasks/LC-01.md 3 HEAD"
+    "  scripts/agents/run_task.sh docs/tasks/TASK-01.md 3 main" \
+    "  scripts/agents/run_task.sh --dry-run docs/tasks/TASK-01.md 3 HEAD"
 }
 
 die() {

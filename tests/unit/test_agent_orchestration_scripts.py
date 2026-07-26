@@ -42,8 +42,8 @@ def test_reviewer_prompts_do_not_expand_task_scope() -> None:
 
 
 def test_run_task_dry_run_smoke() -> None:
-    # Prefer a tracked task file present in this checkout.
-    task = "docs/tasks/DX-01.md"
+    # Use a stable tracked document; this test validates shell/path plumbing.
+    task = "docs/PERSONAL_CORE_V2.md"
     completed = subprocess.run(
         ["bash", str(AGENTS / "run_task.sh"), "--dry-run", task, "3", "HEAD"],
         cwd=str(REPO_ROOT),

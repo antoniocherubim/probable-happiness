@@ -32,7 +32,7 @@ reviewer = [".agent-loop/reviewer.md"]
 [documentation]
 required = true
 required_paths = [
-  "ROADMAP.md",
+  "README.md",
   "docs/tasks/{task_id}.md",
 ]
 
