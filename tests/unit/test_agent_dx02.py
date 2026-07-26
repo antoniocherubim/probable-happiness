@@ -346,8 +346,11 @@ def test_supervisor_emits_periodic_safe_heartbeat(tmp_path: Path, capsys: pytest
     output = capsys.readouterr().out
     assert output.count("Reviewer iteration=2 active") >= 2
     assert "pid=" in output and "changed_files=" in output and "last_activity=" in output
+    assert "unit=" in output and "agent-loop-" in output
     heartbeat = json.loads((run_dir / "heartbeat.json").read_text())
     assert heartbeat["state"] == "completed"
+    assert heartbeat["systemd_unit"].endswith(".scope")
+    assert heartbeat["process_group"] is None
 
 
 def test_reviewer_timeout_is_structured_and_incomplete_json_is_rejected(tmp_path: Path) -> None:

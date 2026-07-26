@@ -400,8 +400,10 @@ _VALIDATION_RESULT_KEYS = frozenset(
         "last_activity_at",
         "changed_files",
         "finished_at",
+        "systemd_unit",
     }
 )
+_VALIDATION_RESULT_REQUIRED = _VALIDATION_RESULT_KEYS - {"systemd_unit"}
 
 # Production Cursor Agent ``--output-format json`` result envelope (same contract
 # as resume/plan_resume). Synthetic ``{"summary": …}`` fixtures are refused.
@@ -441,7 +443,7 @@ def _validate_validation_result(path: Path, data: Any) -> dict[str, Any]:
         raise SnapshotError(FUTURE_SCHEMA_REFUSAL)
     if schema != 1:
         raise SnapshotError(f"{label} schema_version mismatch")
-    if not _VALIDATION_RESULT_KEYS.issubset(data):
+    if not _VALIDATION_RESULT_REQUIRED.issubset(data):
         raise SnapshotError(f"{label} missing required fields")
     if (
         not isinstance(data.get("phase"), str)
@@ -462,6 +464,13 @@ def _validate_validation_result(path: Path, data: Any) -> dict[str, Any]:
         or type(data.get("changed_files")) is not int
         or not isinstance(data.get("finished_at"), str)
         or not data["finished_at"]
+        or (
+            "systemd_unit" in data
+            and (
+                not isinstance(data.get("systemd_unit"), str)
+                or not data["systemd_unit"]
+            )
+        )
     ):
         raise SnapshotError(f"{label} field types are invalid")
     return data

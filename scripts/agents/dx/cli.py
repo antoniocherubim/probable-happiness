@@ -47,6 +47,7 @@ from .runstate import (
     write_run_metadata,
 )
 from .runtime import phase_settings, supervise_command, tracked_worktree_clean
+from .systemd_scope import SystemdScopeError
 from .snapshot import (
     SUMMARY_FILENAME,
     SnapshotError,
@@ -314,7 +315,7 @@ def _run_profile_command(
             report_path=report,
             sanitize_artifacts=artifacts or (),
         )
-    except (OSError, ProfileError, ValueError) as exc:
+    except (OSError, ProfileError, SystemdScopeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 

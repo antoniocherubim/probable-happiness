@@ -1049,12 +1049,13 @@ def test_critical_decision_recovery_refuses_forged_bindings(tmp_path: Path) -> N
 def test_supervisor_terminates_group_on_status_or_heartbeat_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import signal
     import subprocess
     import time
 
+    from dx import systemd_scope
     from dx.runtime import supervise_command
     from dx.state_machine import StateTransitionError
+    from dx.systemd_scope import scope_active_state, scope_unit_basename
 
     worktree = tmp_path / "wt"
     worktree.mkdir()
@@ -1073,14 +1074,15 @@ def test_supervisor_terminates_group_on_status_or_heartbeat_failure(
     status.write_text("EXECUTING\n", encoding="utf-8")
     os.chmod(status, 0o644)
 
-    signals: list[int] = []
-    real_killpg = os.killpg
+    stops: list[str] = []
+    real_stop = systemd_scope.stop_user_scope
 
-    def tracking_killpg(pgid: int, sig: int) -> None:
-        signals.append(sig)
-        return real_killpg(pgid, sig)
+    def tracking_stop(basename: str, *, grace_seconds: int) -> None:
+        stops.append(basename)
+        return real_stop(basename, grace_seconds=grace_seconds)
 
-    monkeypatch.setattr(os, "killpg", tracking_killpg)
+    monkeypatch.setattr(systemd_scope, "stop_user_scope", tracking_stop)
+    monkeypatch.setattr("dx.runtime.stop_user_scope", tracking_stop)
     with pytest.raises(StateTransitionError, match="cannot be read safely|insecure"):
         supervise_command(
             command=[sys.executable, "-c", script],
@@ -1094,7 +1096,9 @@ def test_supervisor_terminates_group_on_status_or_heartbeat_failure(
             heartbeat_seconds=1,
             terminate_grace_seconds=1,
         )
-    assert signal.SIGTERM in signals or signal.SIGKILL in signals
+    expected = scope_unit_basename(run_dir.name, "executor", 1)
+    assert expected in stops
+    assert scope_active_state(expected) in {None, "inactive", "failed"}
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline and child_pid.exists() and Path(
         f"/proc/{child_pid.read_text().strip()}"
@@ -1103,7 +1107,7 @@ def test_supervisor_terminates_group_on_status_or_heartbeat_failure(
     if child_pid.exists():
         assert not Path(f"/proc/{child_pid.read_text().strip()}").exists()
 
-    # Heartbeat symlink/write failure must also reap the group.
+    # Heartbeat symlink/write failure must also reap the scope.
     run_dir2 = tmp_path / "run-hb"
     run_dir2.mkdir(mode=0o700)
     (run_dir2 / "status").write_text("EXECUTING\n", encoding="utf-8")
@@ -1118,7 +1122,7 @@ def test_supervisor_terminates_group_on_status_or_heartbeat_failure(
         f"pathlib.Path({str(child_pid2)!r}).write_text(str(os.getpid())); "
         "time.sleep(60)"
     )
-    signals.clear()
+    stops.clear()
     with pytest.raises((PersistError, ValueError, OSError), match="symlink"):
         supervise_command(
             command=[sys.executable, "-c", script2],
@@ -1132,7 +1136,9 @@ def test_supervisor_terminates_group_on_status_or_heartbeat_failure(
             heartbeat_seconds=1,
             terminate_grace_seconds=1,
         )
-    assert signal.SIGTERM in signals or signal.SIGKILL in signals
+    expected2 = scope_unit_basename(run_dir2.name, "executor", 1)
+    assert expected2 in stops
+    assert scope_active_state(expected2) in {None, "inactive", "failed"}
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline and child_pid2.exists() and Path(
         f"/proc/{child_pid2.read_text().strip()}"

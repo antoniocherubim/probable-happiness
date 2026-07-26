@@ -287,8 +287,10 @@ _PHASE_RESULT_KEYS = frozenset(
         "last_activity_at",
         "changed_files",
         "finished_at",
+        "systemd_unit",
     }
 )
+_PHASE_RESULT_REQUIRED = _PHASE_RESULT_KEYS - {"systemd_unit"}
 _EVIDENCE_MANIFEST_KEYS = frozenset({"schema_version", "items"})
 _EVIDENCE_ITEM_KEYS = frozenset(
     {"name", "sha256", "size_bytes", "attached_at", "trust"}
@@ -312,7 +314,7 @@ def _validate_resume_report_contract(
         unknown = set(data) - allowed
         if unknown:
             raise RunStateError(f"{label} has unknown fields")
-        if not allowed.issubset(data):
+        if not _PHASE_RESULT_REQUIRED.issubset(data):
             raise RunStateError(f"{label} missing required fields")
         if (
             not isinstance(data.get("phase"), str)
@@ -333,6 +335,13 @@ def _validate_resume_report_contract(
             or type(data.get("changed_files")) is not int
             or not isinstance(data.get("finished_at"), str)
             or not data["finished_at"]
+            or (
+                "systemd_unit" in data
+                and (
+                    not isinstance(data.get("systemd_unit"), str)
+                    or not data["systemd_unit"]
+                )
+            )
         ):
             raise RunStateError(f"{label} field types are invalid")
         return
