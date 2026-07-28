@@ -13,6 +13,10 @@ class TelegramError(RuntimeError):
     """Bot API failure that must not mutate approval state."""
 
 
+class TelegramPollingConflict(TelegramError):
+    """Another consumer is polling updates for the same Telegram bot."""
+
+
 @dataclass
 class FakeHttpResponse:
     status: int
@@ -103,6 +107,10 @@ class TelegramClient:
             raise TelegramError(f"invalid JSON from telegram for {method}") from exc
         if resp.status >= 400 or not data.get("ok"):
             description = data.get("description", resp.body[:200])
+            if resp.status == 409 and method == "getUpdates":
+                raise TelegramPollingConflict(
+                    f"another consumer is polling this Telegram bot: {description}"
+                )
             raise TelegramError(f"telegram API error for {method}: {description}")
         return data.get("result")
 

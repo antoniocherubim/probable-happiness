@@ -126,9 +126,12 @@ AGENT_TELEGRAM_CREDENTIALS_FILE=~/.config/codex-cursor-agent-loop/telegram.env \
 
 A ponte usa long polling, não abre porta pública e não aceita comandos de shell.
 Somente o `user_id` e `chat_id` numéricos allowlisted podem aprovar. Falha de
-rede nunca promove estado. Execute somente uma ponte por state root: ela varre
-os runs de todos os projetos, mas o processo ainda não possui trava global de
-instância.
+rede nunca promove estado. Execute somente uma ponte por bot: ela varre os runs
+de todos os projetos e mantém uma trava local por token. Uma segunda instância,
+mesmo configurada com outro state root, encerra antes de disputar updates com a
+primeira. Um conflito HTTP 409 reportado pelo Telegram — inclusive contra um
+consumidor em outra máquina ou sessão — também encerra a ponte, pois continuar
+permitiria que callbacks fossem consumidos pelo state root errado.
 
 Ao abrir o gate, o Telegram recebe ID/título, repositório, base, iteração, hash,
 arquivos, estatísticas, executor, testes/validações, reviewer, findings, riscos

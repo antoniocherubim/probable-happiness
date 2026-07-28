@@ -440,6 +440,8 @@ def test_telegram_bridge_service_is_rendered_for_paths_with_spaces(tmp_path: Pat
     assert f'"{REPO_ROOT}/scripts/agents/telegram_bridge.py"' in text
     assert f'--runs-root "{state_root}"' in text
     assert f'ReadWritePaths="{state_root}"' in text
+    assert "RuntimeDirectory=codex-cursor-agent-loop" in text
+    assert "RuntimeDirectoryMode=0700" in text
     assert "new_chatbot" not in text
     assert "@TOOL_ROOT@" not in text
 

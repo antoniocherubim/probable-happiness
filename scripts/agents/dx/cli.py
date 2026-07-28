@@ -20,7 +20,14 @@ from .approval import (
     verify_reviewed_snapshot,
     wait_for_decision,
 )
-from .bridge import Bridge, build_awaiting_summary, build_blocked_summary
+from .bridge import (
+    BRIDGE_ALREADY_RUNNING_EXIT,
+    Bridge,
+    BridgeAlreadyRunning,
+    bridge_instance_lock,
+    build_awaiting_summary,
+    build_blocked_summary,
+)
 from .config import ConfigError, human_approval_timeout_sec, load_bridge_config
 from .atomic import atomic_write_json
 from .integration import IntegrationError, integrate_reviewed_snapshot
@@ -62,7 +69,7 @@ from .state_machine import (
     transition_run,
 )
 from .systemd_scope import SystemdScopeError
-from .telegram import TelegramClient
+from .telegram import TelegramClient, TelegramPollingConflict
 
 
 RUNNER_TRANSITION_EVENTS = (
@@ -671,13 +678,28 @@ def cmd_serve(args: argparse.Namespace) -> int:
     runs_root = Path(args.runs_root) if args.runs_root else (config.runs_root or _default_runs_root())
     client = TelegramClient(config.bot_token, api_base=config.api_base)
     bridge = Bridge(config, client, runs_root)
-    logging.getLogger("agent_dx.bridge").info(
-        "serving runs_root=%s allowlist_user=%s allowlist_chat=%s",
-        runs_root,
-        config.allowed_user_id,
-        config.allowed_chat_id,
-    )
-    bridge.run_forever(max_cycles=args.max_cycles)
+    try:
+        with bridge_instance_lock(config):
+            logging.getLogger("agent_dx.bridge").info(
+                "serving runs_root=%s allowlist_user=%s allowlist_chat=%s",
+                runs_root,
+                config.allowed_user_id,
+                config.allowed_chat_id,
+            )
+            bridge.run_forever(max_cycles=args.max_cycles)
+    except BridgeAlreadyRunning as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return BRIDGE_ALREADY_RUNNING_EXIT
+    except TelegramPollingConflict as exc:
+        print(
+            f"ERROR: Telegram polling conflict: {exc}. "
+            "Stop the other bot consumer before restarting this bridge.",
+            file=sys.stderr,
+        )
+        return BRIDGE_ALREADY_RUNNING_EXIT
+    except OSError as exc:
+        print(f"ERROR: could not establish Telegram bridge singleton: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

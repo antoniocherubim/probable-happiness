@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import logging
+import os
+import stat
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .approval import (
     apply_human_approval,
@@ -17,13 +23,88 @@ from .approval import (
     truncate_message,
 )
 from .config import BridgeConfig
-from .telegram import TelegramClient, TelegramError
+from .telegram import TelegramClient, TelegramError, TelegramPollingConflict
 
 logger = logging.getLogger("agent_dx.bridge")
 
 NEUTRAL_UNAUTHORIZED = "OK."
 NEUTRAL_UNSUPPORTED = "Only the approval button is supported."
 NEUTRAL_GROUP = "OK."
+BRIDGE_ALREADY_RUNNING_EXIT = 73
+
+
+class BridgeAlreadyRunning(RuntimeError):
+    """Another local bridge already owns Telegram polling for this bot."""
+
+
+def _bridge_runtime_dir(environ: dict[str, str] | None = None) -> Path:
+    env = os.environ if environ is None else environ
+    configured = (env.get("XDG_RUNTIME_DIR") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    if hasattr(os, "getuid"):
+        conventional = Path("/run/user") / str(os.getuid())
+        if conventional.is_dir():
+            return conventional
+        return Path(tempfile.gettempdir()) / f"codex-cursor-agent-loop-{os.getuid()}"
+    return Path(tempfile.gettempdir()) / "codex-cursor-agent-loop"
+
+
+@contextmanager
+def bridge_instance_lock(
+    config: BridgeConfig,
+    *,
+    environ: dict[str, str] | None = None,
+) -> Iterator[Path]:
+    """
+    Allow only one polling bridge per Telegram bot on this host.
+
+    The lock intentionally lives outside ``runs_root``: two bridges pointed at
+    different state roots still compete for the same Telegram update stream and
+    can otherwise consume callbacks that only the other bridge can resolve.
+    """
+    runtime_root = _bridge_runtime_dir(environ)
+    lock_dir = runtime_root / "codex-cursor-agent-loop"
+    lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory_info = lock_dir.lstat()
+    if (
+        stat.S_ISLNK(directory_info.st_mode)
+        or not stat.S_ISDIR(directory_info.st_mode)
+        or (hasattr(os, "getuid") and directory_info.st_uid != os.getuid())
+        or directory_info.st_mode & 0o077
+    ):
+        raise OSError(f"unsafe Telegram bridge lock directory: {lock_dir}")
+
+    bot_id = hashlib.sha256(config.bot_token.encode("utf-8")).hexdigest()[:24]
+    lock_path = lock_dir / f"telegram-{bot_id}.lock"
+    fd = os.open(
+        str(lock_path),
+        os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        file_info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(file_info.st_mode)
+            or (hasattr(os, "getuid") and file_info.st_uid != os.getuid())
+        ):
+            raise OSError(f"unsafe Telegram bridge lock file: {lock_path}")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise BridgeAlreadyRunning(
+                "another agent-loop bridge is already polling this Telegram bot; "
+                "use one bridge for the shared state root"
+            ) from exc
+        os.ftruncate(fd, 0)
+        os.write(fd, f"pid={os.getpid()}\n".encode("ascii"))
+        os.fsync(fd)
+        yield lock_path
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 class Bridge:
@@ -138,6 +219,10 @@ class Bridge:
                 offset=self._offset,
                 timeout=self.config.poll_timeout_sec,
             )
+        except TelegramPollingConflict:
+            # Continuing would let competing consumers alternately steal
+            # callbacks and resolve them against different state roots.
+            raise
         except TelegramError as exc:
             logger.warning("getUpdates failed: %s", exc)
             return 0

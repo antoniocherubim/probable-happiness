@@ -10,10 +10,13 @@ EnvironmentFile=@CREDENTIALS_FILE@
 ExecStartPre=+/usr/bin/mkdir -p @STATE_ROOT@
 ExecStart=/usr/bin/python3 @BRIDGE_SCRIPT@ serve --runs-root @STATE_ROOT@
 Restart=on-failure
+RestartPreventExitStatus=73
 RestartSec=5
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
+RuntimeDirectory=codex-cursor-agent-loop
+RuntimeDirectoryMode=0700
 ReadWritePaths=@STATE_ROOT@
 PrivateTmp=true
 

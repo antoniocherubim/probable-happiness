@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,10 +22,21 @@ from dx.approval import (  # noqa: E402
     load_decision,
     read_status,
 )
-from dx.bridge import Bridge  # noqa: E402
+from dx.bridge import (  # noqa: E402
+    BRIDGE_ALREADY_RUNNING_EXIT,
+    Bridge,
+    BridgeAlreadyRunning,
+    bridge_instance_lock,
+)
+from dx.cli import cmd_serve  # noqa: E402
 from dx.config import BridgeConfig, ConfigError, load_bridge_config  # noqa: E402
 from dx.state_machine import RunEvent, transition_run  # noqa: E402
-from dx.telegram import FakeTelegramAPI, TelegramClient  # noqa: E402
+from dx.telegram import (  # noqa: E402
+    FakeHttpResponse,
+    FakeTelegramAPI,
+    TelegramClient,
+    TelegramPollingConflict,
+)
 
 
 ALLOWED_USER = 1001
@@ -149,6 +162,105 @@ def test_config_redacts_token(tmp_path: Path) -> None:
     redacted = cfg.redacted()
     assert "abcdefghijklmnop" not in json.dumps(redacted)
     assert redacted["allowed_user_id"] == 1
+
+
+def test_only_one_bridge_per_bot_even_for_different_state_roots(tmp_path: Path) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir(mode=0o700)
+    environ = {"XDG_RUNTIME_DIR": str(runtime_dir)}
+    first = BridgeConfig(
+        bot_token=TOKEN,
+        allowed_user_id=ALLOWED_USER,
+        allowed_chat_id=ALLOWED_CHAT,
+    )
+    second = BridgeConfig(
+        bot_token=TOKEN,
+        allowed_user_id=ALLOWED_USER,
+        allowed_chat_id=ALLOWED_CHAT,
+        runs_root=tmp_path / "some-other-state-root",
+    )
+
+    with bridge_instance_lock(first, environ=environ) as lock_path:
+        assert lock_path.is_file()
+        assert f"pid={os.getpid()}" in lock_path.read_text(encoding="ascii")
+        with pytest.raises(BridgeAlreadyRunning, match="already polling"):
+            with bridge_instance_lock(second, environ=environ):
+                pytest.fail("a duplicate bridge acquired the bot lock")
+
+    with bridge_instance_lock(second, environ=environ):
+        pass
+
+
+def test_different_bots_can_use_the_same_runtime_directory(tmp_path: Path) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir(mode=0o700)
+    environ = {"XDG_RUNTIME_DIR": str(runtime_dir)}
+    first = BridgeConfig(TOKEN, ALLOWED_USER, ALLOWED_CHAT)
+    second = BridgeConfig("987654:OTHER-BOT", ALLOWED_USER, ALLOWED_CHAT)
+
+    with bridge_instance_lock(first, environ=environ):
+        with bridge_instance_lock(second, environ=environ):
+            pass
+
+
+def test_serve_refuses_duplicate_before_polling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir(mode=0o700)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_dir))
+    monkeypatch.setenv("AGENT_TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("AGENT_TELEGRAM_ALLOWED_USER_ID", str(ALLOWED_USER))
+    monkeypatch.setenv("AGENT_TELEGRAM_ALLOWED_CHAT_ID", str(ALLOWED_CHAT))
+    config = BridgeConfig(TOKEN, ALLOWED_USER, ALLOWED_CHAT)
+
+    with bridge_instance_lock(config):
+        result = cmd_serve(
+            SimpleNamespace(runs_root=str(tmp_path / "other-state"), max_cycles=1)
+        )
+
+    assert result == BRIDGE_ALREADY_RUNNING_EXIT
+    assert "already polling this Telegram bot" in capsys.readouterr().err
+
+
+def test_telegram_get_updates_409_is_a_fatal_polling_conflict() -> None:
+    class ConflictTransport:
+        def request(self, *_args: object, **_kwargs: object) -> FakeHttpResponse:
+            return FakeHttpResponse(
+                status=409,
+                body=json.dumps(
+                    {
+                        "ok": False,
+                        "description": "terminated by other getUpdates request",
+                    }
+                ).encode(),
+            )
+
+    client = TelegramClient(TOKEN, transport=ConflictTransport())
+
+    with pytest.raises(TelegramPollingConflict, match="another consumer"):
+        client.get_updates(timeout=1)
+
+
+def test_bridge_does_not_swallow_polling_conflict(tmp_path: Path) -> None:
+    class ConflictTransport:
+        def request(self, *_args: object, **_kwargs: object) -> FakeHttpResponse:
+            return FakeHttpResponse(
+                status=409,
+                body=json.dumps({"ok": False, "description": "conflict"}).encode(),
+            )
+
+    config = BridgeConfig(TOKEN, ALLOWED_USER, ALLOWED_CHAT, poll_timeout_sec=1)
+    bridge = Bridge(
+        config,
+        TelegramClient(TOKEN, transport=ConflictTransport()),
+        tmp_path,
+    )
+
+    with pytest.raises(TelegramPollingConflict):
+        bridge.process_updates_once()
 
 
 def test_authorized_callback_approves(bridge_env: dict) -> None:
