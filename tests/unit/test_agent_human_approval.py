@@ -1615,7 +1615,7 @@ def test_verify_requires_valid_human_approval(
         review_report="review.json",
     )
 
-    with pytest.raises(ApprovalError, match="not HUMAN_APPROVED"):
+    with pytest.raises(ApprovalError, match="not terminal technical APPROVED"):
         verify_reviewed_snapshot(run_dir)
 
 

@@ -1,4 +1,4 @@
-"""Telegram Bot API client (long polling only; no public webhook)."""
+"""Minimal outbound Telegram Bot API client."""
 
 from __future__ import annotations
 
@@ -11,10 +11,6 @@ from typing import Any, Protocol
 
 class TelegramError(RuntimeError):
     """Bot API failure that must not mutate approval state."""
-
-
-class TelegramPollingConflict(TelegramError):
-    """Another consumer is polling updates for the same Telegram bot."""
 
 
 @dataclass
@@ -107,32 +103,14 @@ class TelegramClient:
             raise TelegramError(f"invalid JSON from telegram for {method}") from exc
         if resp.status >= 400 or not data.get("ok"):
             description = data.get("description", resp.body[:200])
-            if resp.status == 409 and method == "getUpdates":
-                raise TelegramPollingConflict(
-                    f"another consumer is polling this Telegram bot: {description}"
-                )
             raise TelegramError(f"telegram API error for {method}: {description}")
         return data.get("result")
-
-    def get_updates(self, offset: int | None = None, timeout: int = 25) -> list[dict[str, Any]]:
-        payload: dict[str, Any] = {
-            "timeout": timeout,
-            "allowed_updates": ["message", "callback_query"],
-        }
-        if offset is not None:
-            payload["offset"] = offset
-        # Long poll needs timeout > Telegram's timeout parameter.
-        result = self.call("getUpdates", payload, timeout=float(timeout) + 10)
-        if not isinstance(result, list):
-            raise TelegramError("getUpdates did not return a list")
-        return result
 
     def send_message(
         self,
         chat_id: int,
         text: str,
         *,
-        reply_markup: dict[str, Any] | None = None,
         disable_web_page_preview: bool = True,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -140,18 +118,10 @@ class TelegramClient:
             "text": text,
             "disable_web_page_preview": disable_web_page_preview,
         }
-        if reply_markup is not None:
-            payload["reply_markup"] = reply_markup
         result = self.call("sendMessage", payload)
         if not isinstance(result, dict):
             raise TelegramError("sendMessage did not return an object")
         return result
-
-    def answer_callback_query(self, callback_query_id: str, text: str | None = None) -> bool:
-        payload: dict[str, Any] = {"callback_query_id": callback_query_id}
-        if text is not None:
-            payload["text"] = text
-        return bool(self.call("answerCallbackQuery", payload))
 
 
 @dataclass
@@ -159,13 +129,10 @@ class FakeTelegramAPI:
     """In-memory Bot API fake for unit tests (no network)."""
 
     allowed_token: str
-    updates: list[dict[str, Any]] = field(default_factory=list)
     sent_messages: list[dict[str, Any]] = field(default_factory=list)
-    answered_callbacks: list[dict[str, Any]] = field(default_factory=list)
     fail_methods: set[str] = field(default_factory=set)
     timeout_methods: set[str] = field(default_factory=set)
     fail_send_after: int | None = None
-    next_update_id: int = 1
 
     def as_transport(self) -> HttpTransport:
         api = self
@@ -194,17 +161,6 @@ class FakeTelegramAPI:
                         body=json.dumps({"ok": False, "description": "upstream"}).encode(),
                     )
                 payload = json.loads(body.decode("utf-8") if body else "{}")
-                if api_method == "getUpdates":
-                    offset = payload.get("offset")
-                    batch = []
-                    for update in api.updates:
-                        if offset is not None and update["update_id"] < offset:
-                            continue
-                        batch.append(update)
-                    return FakeHttpResponse(
-                        status=200,
-                        body=json.dumps({"ok": True, "result": batch}).encode(),
-                    )
                 if api_method == "sendMessage":
                     if (
                         api.fail_send_after is not None
@@ -220,59 +176,9 @@ class FakeTelegramAPI:
                         status=200,
                         body=json.dumps({"ok": True, "result": msg}).encode(),
                     )
-                if api_method == "answerCallbackQuery":
-                    api.answered_callbacks.append(payload)
-                    return FakeHttpResponse(
-                        status=200,
-                        body=json.dumps({"ok": True, "result": True}).encode(),
-                    )
                 return FakeHttpResponse(
                     status=404,
                     body=json.dumps({"ok": False, "description": "unknown method"}).encode(),
                 )
 
         return _Transport()
-
-    def push_callback(
-        self,
-        *,
-        user_id: int,
-        chat_id: int,
-        data: str,
-        callback_query_id: str = "cb-1",
-        chat_type: str = "private",
-    ) -> None:
-        update = {
-            "update_id": self.next_update_id,
-            "callback_query": {
-                "id": callback_query_id,
-                "from": {"id": user_id, "username": "ignored"},
-                "data": data,
-                "message": {
-                    "message_id": 1,
-                    "chat": {"id": chat_id, "type": chat_type},
-                },
-            },
-        }
-        self.next_update_id += 1
-        self.updates.append(update)
-
-    def push_message(
-        self,
-        *,
-        user_id: int,
-        chat_id: int,
-        text: str,
-        chat_type: str = "private",
-    ) -> None:
-        update = {
-            "update_id": self.next_update_id,
-            "message": {
-                "message_id": self.next_update_id,
-                "text": text,
-                "from": {"id": user_id, "username": "ignored"},
-                "chat": {"id": chat_id, "type": chat_type},
-            },
-        }
-        self.next_update_id += 1
-        self.updates.append(update)

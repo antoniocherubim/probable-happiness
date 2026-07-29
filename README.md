@@ -1,7 +1,7 @@
 # Codex Cursor Agent Loop
 
 Runner externo para executar uma task com Cursor Agent, revisar o resultado com
-Codex e preservar um snapshot verificável. A decisão humana pelo Telegram é
+Codex e preservar um snapshot verificável. O envio da conclusão pelo Telegram é
 opcional.
 
 A implementação atual é o [Personal Core v2](docs/PERSONAL_CORE_V2.md): um
@@ -21,8 +21,8 @@ As mudanças de estado passam por uma tabela tipada e compare-and-set sob
 O projeto é mantido para uso pessoal, sem compromisso de distribuição ou
 compatibilidade para terceiros.
 
-O runner não faz commit, push, merge, tag, PR ou deploy. Após o aceite técnico
-ou humano, ele preserva o worktree e o hash revisado para integração Git manual.
+O runner não faz commit, push, merge, tag, PR ou deploy. Após o aceite técnico,
+ele preserva o worktree e o hash revisado para integração Git manual.
 Não existe configuração de publicação; uma tabela `[delivery]` é recusada como
 desconhecida.
 
@@ -66,19 +66,20 @@ Sem `XDG_STATE_HOME`, usa `~/.local/state`. `--state-root` permite outro local.
 O identificador inclui o caminho canônico do Git, isolando repositórios com o
 mesmo nome e aliases por symlink.
 
-## Aprovação opcional
+## Notificação opcional
 
 O perfil escolhe explicitamente:
 
 ```toml
 [approval]
 mode = "none"      # termina em APPROVED após review e verificação local
-# mode = "telegram"  # abre o gate humano existente
+# mode = "telegram"  # também envia uma notificação terminal
 ```
 
-O default de compatibilidade é `telegram`. Em `none`, nenhum request ou outbox
-Telegram é criado; `verify` aceita o manifesto técnico congelado. Em `telegram`,
-configure token e IDs numéricos fora do Git conforme
+O default de compatibilidade é `telegram`. Nos dois modos, um review válido
+termina em `APPROVED` e `verify` aceita o manifesto técnico congelado. Em
+`none`, nenhum outbox Telegram é criado. Em `telegram`, configure o token e o
+ID numérico do chat fora do Git conforme
 [`docs/AGENT_ORCHESTRATION.md`](docs/AGENT_ORCHESTRATION.md), então execute:
 
 ```bash
@@ -87,21 +88,18 @@ configure token e IDs numéricos fora do Git conforme
 
 Execute somente uma instância da ponte por bot. A ponte mantém uma trava local
 por token e recusa uma segunda instância, mesmo que ela aponte para outro state
-root. Se o próprio Telegram detectar um consumidor em outra máquina ou sessão,
-a ponte tolera um único conflito transitório durante restart, enquanto a
-requisição anterior se encerra. Reincidência em uma janela curta faz a ponte
-parar com diagnóstico explícito em vez de disputar e perder callbacks.
-Uma única ponte descobre runs de múltiplos projetos. O
-Telegram envia o resumo técnico em partes numeradas; somente a última contém os
-botões **Aprovar alterações** e **Rejeitar**. A aprovação registra apenas
-`HUMAN_APPROVED`; não cria job, commit ou branch e não acessa a rede Git.
+root. Uma única ponte descobre runs de múltiplos projetos e usa somente
+`sendMessage`: não consulta updates, não recebe callbacks e não exibe botões.
+Falha ou ausência da ponte não impede a conclusão do run; o outbox permanece
+pendente para uma tentativa posterior.
+
 Para integrar o snapshot aprovado na branch local atualmente selecionada:
 
 ```bash
 ./agent-loop integrate --run-dir /caminho/externo/para/o/run
 ```
 
-`integrate` verifica novamente decisão, manifesto e hash; exige checkout limpo
+`integrate` verifica novamente estado, manifesto e hash; exige checkout limpo
 na branch cujo `HEAD` ainda é o commit-base; cria o commit a partir dos bytes
 revisados em um index temporário; desativa hooks e faz somente fast-forward
 local. O diff completo, incluindo arquivos antes não rastreados, passa por
@@ -148,7 +146,7 @@ executa Git e não precisa escrever no repositório.
 
 - `agent-loop`: CLI externa (`run`, `review`, `resume`, `evidence`, `serve`, `verify`, `systemd-unit`);
 - `scripts/agents/`: executor, revisor e ponte Telegram;
-- `scripts/agents/dx/`: estado, hash, concorrência, aprovação e cliente Bot API;
+- `scripts/agents/dx/`: estado, hash, concorrência, snapshot e cliente Bot API;
 - `.agents/reviewer-output.schema.json`: contrato de saída do revisor;
 - `tests/unit/`: suíte focada;
 - `docs/`: contrato atual, operação, perfil e exemplos mínimos.

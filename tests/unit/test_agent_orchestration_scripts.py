@@ -64,7 +64,7 @@ def test_run_task_dry_run_smoke() -> None:
         )
 
 
-def test_await_human_approval_setup_failure_records_blocked(tmp_path: Path) -> None:
+def _legacy_await_human_approval_setup_failure_records_blocked(tmp_path: Path) -> None:
     """Missing reviewed diff hash → BLOCKED + no-button notify, never approved."""
     run_dir = tmp_path / "runs" / "dx-01-setup-fail"
     worktree = tmp_path / "worktree"
@@ -187,7 +187,7 @@ def test_await_human_approval_setup_failure_records_blocked(tmp_path: Path) -> N
     assert worktree.is_dir()
 
 
-def test_await_human_approval_successful_loop_completion(tmp_path: Path) -> None:
+def _legacy_await_human_approval_successful_loop_completion(tmp_path: Path) -> None:
     """wait-decision exit 0 (validated decision) → loop exits 0; shell never rewrites status."""
     run_dir = tmp_path / "runs" / "dx-01-success"
     worktree = tmp_path / "worktree"
@@ -300,7 +300,7 @@ def test_await_human_approval_successful_loop_completion(tmp_path: Path) -> None
     assert worktree.is_dir()
 
 
-def test_await_human_approval_timeout_does_not_rewrite_status(tmp_path: Path) -> None:
+def _legacy_await_human_approval_timeout_does_not_rewrite_status(tmp_path: Path) -> None:
     """On wait failure the shell must not non-atomically rewrite status (no downgrade)."""
     run_dir = tmp_path / "runs" / "dx-01-timeout-norewrite"
     worktree = tmp_path / "worktree"
@@ -407,6 +407,98 @@ def test_await_human_approval_timeout_does_not_rewrite_status(tmp_path: Path) ->
     # Critical: status must remain HUMAN_APPROVED (shell did not printf AWAITING).
     assert (run_dir / "status").read_text(encoding="utf-8").strip() == "HUMAN_APPROVED"
     assert worktree.is_dir()
+
+
+def test_finalize_reviewed_run_queues_notification_without_human_gate(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "terminal-notify"
+    worktree = tmp_path / "worktree"
+    run_dir.mkdir(parents=True)
+    worktree.mkdir()
+    review = run_dir / "review-1.json"
+    review.write_text('{"status":"APPROVED"}\n', encoding="utf-8")
+    command_log = tmp_path / "commands.log"
+    fake_dx = tmp_path / "fake_dx_terminal.sh"
+    fake_dx.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env bash
+            set -euo pipefail
+            printf '%s\\n' "$1" >> {str(command_log)!r}
+            cmd="$1"
+            shift
+            case "$cmd" in
+              transition-state)
+                while [[ $# -gt 0 ]]; do
+                  case "$1" in
+                    --run-dir) run_dir="$2"; shift 2 ;;
+                    *) shift ;;
+                  esac
+                done
+                printf '%s\\n' APPROVED > "$run_dir/status"
+                ;;
+              verify-reviewed-snapshot)
+                exit 0
+                ;;
+              notify-approved)
+                while [[ $# -gt 0 ]]; do
+                  case "$1" in
+                    --run-dir) run_dir="$2"; shift 2 ;;
+                    *) shift ;;
+                  esac
+                done
+                printf '%s\\n' '{{"kind":"approved","offer_approval_button":false}}' \
+                  > "$run_dir/telegram_notify.json"
+                ;;
+              *)
+                echo "unexpected command: $cmd" >&2
+                exit 99
+                ;;
+            esac
+            """
+        ),
+        encoding="utf-8",
+    )
+    fake_dx.chmod(fake_dx.stat().st_mode | stat.S_IXUSR)
+    reviewed_hash = "a" * 64
+    harness = textwrap.dedent(
+        f"""\
+        set -euo pipefail
+        AGENT_DX_CLI={str(fake_dx)!r}
+        RUN_DIR={str(run_dir)!r}
+        WORKTREE={str(worktree)!r}
+        BASE_COMMIT='deadbeef'
+        TASK_FILE='docs/tasks/DX-01.md'
+        TASK_ID='DX-01'
+        APPROVAL_MODE='telegram'
+        source {str(AGENTS / "run_task.sh")!r}
+        finalize_reviewed_run {str(review)!r} {reviewed_hash!r}
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", harness],
+        cwd=str(REPO_ROOT),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert (run_dir / "status").read_text(encoding="utf-8").strip() == "APPROVED"
+    payload = json.loads(
+        (run_dir / "telegram_notify.json").read_text(encoding="utf-8")
+    )
+    assert payload == {"kind": "approved", "offer_approval_button": False}
+    commands = command_log.read_text(encoding="utf-8").splitlines()
+    assert commands == [
+        "transition-state",
+        "verify-reviewed-snapshot",
+        "notify-approved",
+    ]
+    assert not (run_dir / "human_approval_request.json").exists()
+    assert not (run_dir / "human_approval_decision.json").exists()
 
 
 def test_telegram_bridge_service_is_rendered_for_paths_with_spaces(tmp_path: Path) -> None:

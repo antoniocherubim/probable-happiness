@@ -264,13 +264,13 @@ def test_summary_is_sanitized_and_chunked() -> None:
     assert "https://user:pw@" not in rendered
 
 
-def test_multipart_approval_uses_local_wording(tmp_path: Path) -> None:
+def test_multipart_terminal_notification_has_no_actions(tmp_path: Path) -> None:
     env = make_local_run(tmp_path)
     run_dir = env["run_dir"]
     messages = ["(1/2)\nfirst", "(2/2)\nlast"]
     enqueue_notification(
         run_dir=run_dir,
-        kind="awaiting_human_approval",
+        kind="approved",
         summary="first",
         messages=messages,
     )
@@ -278,9 +278,7 @@ def test_multipart_approval_uses_local_wording(tmp_path: Path) -> None:
     bridge = Bridge(
         BridgeConfig(
             bot_token="123:fake",
-            allowed_user_id=7,
             allowed_chat_id=7,
-            poll_timeout_sec=1,
         ),
         TelegramClient(
             "123:fake",
@@ -291,8 +289,4 @@ def test_multipart_approval_uses_local_wording(tmp_path: Path) -> None:
     )
     assert bridge.process_outbox_once() == 1
     assert "reply_markup" not in fake.sent_messages[0]
-    buttons = fake.sent_messages[1]["reply_markup"]["inline_keyboard"][0]
-    assert [button["text"] for button in buttons] == [
-        "Aprovar alterações",
-        "Rejeitar",
-    ]
+    assert "reply_markup" not in fake.sent_messages[1]

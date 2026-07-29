@@ -552,7 +552,7 @@ def test_evidence_accepts_regular_file_and_rejects_unsafe_types(
         attach_evidence(run_dir, large, max_bytes=1024)
 
 
-def test_resumed_review_opens_telegram_gate_and_approval_verifies(tmp_path: Path) -> None:
+def test_resumed_review_finishes_and_queues_terminal_notification(tmp_path: Path) -> None:
     _repo, worktree, run_dir, _base = make_run(tmp_path)
     transition_run(run_dir, RunEvent.RUN_BLOCKED)
     evidence = tmp_path / "standalone-review.txt"
@@ -595,29 +595,27 @@ def test_resumed_review_opens_telegram_gate_and_approval_verifies(tmp_path: Path
             **os.environ,
             "CURSOR_AGENT_BIN": str(cursor),
             "CODEX_BIN": str(codex),
-            "AGENT_HUMAN_APPROVAL_TIMEOUT_SEC": "1",
         },
         timeout=15,
     )
-    assert completed.returncode == 2, completed.stdout + completed.stderr
-    assert read_status(run_dir) == STATUS_AWAITING
-    assert (run_dir / "human_approval_request.json").is_file()
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert read_status(run_dir) == STATUS_APPROVED
+    assert not (run_dir / "human_approval_request.json").exists()
     notify = json.loads((run_dir / "telegram_notify.json").read_text())
-    assert notify["offer_approval_button"] is True
+    assert notify["kind"] == "approved"
+    assert notify["offer_approval_button"] is False
 
     token = "123456:DX02-FAKE"
     fake = FakeTelegramAPI(allowed_token=token)
-    config = BridgeConfig(bot_token=token, allowed_user_id=42, allowed_chat_id=42, poll_timeout_sec=1)
+    config = BridgeConfig(bot_token=token, allowed_chat_id=42)
     bridge = Bridge(
         config,
         TelegramClient(token, api_base="http://telegram.test", transport=fake.as_transport()),
         run_dir.parent,
     )
     assert bridge.process_outbox_once() == 1
-    callback_token = notify["callback_token"]
-    fake.push_callback(user_id=42, chat_id=42, data=callback_token, callback_query_id="dx02")
-    assert bridge.process_updates_once() == 1
-    assert read_status(run_dir) == STATUS_HUMAN_APPROVED
+    assert all("reply_markup" not in item for item in fake.sent_messages)
+    assert read_status(run_dir) == STATUS_APPROVED
     assert verify_reviewed_snapshot(run_dir)["matches"] is True
 
 

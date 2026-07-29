@@ -415,19 +415,24 @@ def _run_extended_loop(env: dict[str, object], tmp_path: Path, reviewer_status: 
     )
 
 
-def test_executor_receives_last_feedback_and_approval_reaches_human_gate(
+def test_executor_receives_last_feedback_and_run_finishes_with_notification(
     tmp_path: Path,
 ) -> None:
     env = make_exhausted_run(tmp_path)
     completed = _run_extended_loop(env, tmp_path, "APPROVED")
-    assert completed.returncode == 2, completed.stdout + completed.stderr
+    assert completed.returncode == 0, completed.stdout + completed.stderr
     prompt = (env["run_dir"] / "captured-executor-prompt.txt").read_text(encoding="utf-8")
     assert prompt.count(env["feedback"]) == 1
     assert (env["run_dir"] / "cursor-4.json").is_file()
     assert (env["run_dir"] / "review-4.json").is_file()
-    assert (env["run_dir"] / "human_approval_request.json").is_file()
-    assert read_status(env["run_dir"]) == "AWAITING_HUMAN_APPROVAL"
+    assert not (env["run_dir"] / "human_approval_request.json").exists()
+    assert read_status(env["run_dir"]) == "APPROVED"
     assert not (env["run_dir"] / "human_approval_decision.json").exists()
+    notification = json.loads(
+        (env["run_dir"] / "telegram_notify.json").read_text(encoding="utf-8")
+    )
+    assert notification["kind"] == "approved"
+    assert notification["offer_approval_button"] is False
 
 
 def test_changes_requested_blocks_again_at_effective_limit(tmp_path: Path) -> None:

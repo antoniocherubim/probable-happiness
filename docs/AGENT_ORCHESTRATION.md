@@ -9,9 +9,8 @@ task versionada
   → Codex revisa diff, aceite e testes
   → CHANGES_REQUESTED retorna ao Cursor (orçamento inicial de 1 a 5 ciclos)
   → APPROVED técnico
-  ├─ approval.mode=none → verificação local
-  └─ approval.mode=telegram → AWAITING_HUMAN_APPROVAL
-                              → HUMAN_APPROVED para o hash revisado
+  ├─ approval.mode=none → conclusão local
+  └─ approval.mode=telegram → notificação terminal sem ações
   → verificação manual antes de integrar
 ```
 
@@ -75,17 +74,18 @@ Antes e depois da revisão, o runner calcula SHA-256 sobre:
 - tipo Git, bit executável e conteúdo de arquivos regulares;
 - bytes do destino de symlinks, sem seguir o link.
 
-Os hashes devem coincidir. `HUMAN_APPROVED` no modo `telegram` ou o manifesto
-técnico no modo `none` vincula esse hash imutável, mas não congela o worktree.
+Os hashes devem coincidir. O manifesto técnico em `APPROVED` vincula esse hash
+imutável nos modos `none` e `telegram`, mas não congela o worktree.
 Para uma verificação somente-leitura:
 
 ```bash
 ./agent-loop verify --run-dir /state/projects/<repo-id>/runs/<run-id>
 ```
 
-A verificação retorna sucesso quando há decisão humana válida em
-`HUMAN_APPROVED`, ou aceite técnico terminal em `APPROVED` com
-`approval.mode = "none"`, e o hash atual ainda coincide.
+A verificação retorna sucesso quando há aceite técnico terminal em `APPROVED`,
+o manifesto corresponde ao perfil congelado e o hash atual ainda coincide.
+Runs antigos em `HUMAN_APPROVED` continuam verificáveis somente para
+compatibilidade de leitura.
 
 Para criar o commit e avançar a branch local que ainda aponta exatamente para
 o commit-base:
@@ -103,47 +103,40 @@ a branch. Nenhum remoto é consultado ou modificado; push permanece manual.
 ## Telegram
 
 Telegram é opcional. Selecione `[approval] mode = "telegram"` no perfil para
-usar esta seção. Sem a ponte ou durante indisponibilidade de rede, o run
-permanece em `AWAITING_HUMAN_APPROVAL`; `resume` apenas retoma a espera e nunca
-inventa uma decisão.
+receber a mensagem terminal. A conclusão do run independe da ponte e da rede:
+o estado fica `APPROVED` e o outbox pendente é reenviado quando o notifier
+estiver disponível.
 
 Crie um arquivo externo, por exemplo
 `~/.config/codex-cursor-agent-loop/telegram.env`, com permissão `0600`:
 
 ```bash
 AGENT_TELEGRAM_BOT_TOKEN=token-do-botfather
-AGENT_TELEGRAM_ALLOWED_USER_ID=123456
 AGENT_TELEGRAM_ALLOWED_CHAT_ID=123456
 ```
 
-Opcionalmente configure `AGENT_TELEGRAM_POLL_TIMEOUT_SEC` e
-`AGENT_HUMAN_APPROVAL_TIMEOUT_SEC`. Inicie em foreground:
+Opcionalmente configure `AGENT_TELEGRAM_API_BASE`. Inicie em foreground:
 
 ```bash
 AGENT_TELEGRAM_CREDENTIALS_FILE=~/.config/codex-cursor-agent-loop/telegram.env \
   ./agent-loop serve
 ```
 
-A ponte usa long polling, não abre porta pública e não aceita comandos de shell.
-Somente o `user_id` e `chat_id` numéricos allowlisted podem aprovar. Falha de
-rede nunca promove estado. Execute somente uma ponte por bot: ela varre os runs
-de todos os projetos e mantém uma trava local por token. Uma segunda instância,
-mesmo configurada com outro state root, encerra antes de disputar updates com a
-primeira. Um conflito HTTP 409 reportado pelo Telegram — inclusive contra um
-consumidor em outra máquina ou sessão — é tolerado uma vez durante restart para
-que o long poll anterior seja encerrado. Se reincidir em uma janela curta, a
-ponte encerra, pois continuar permitiria que callbacks fossem consumidos pelo
-state root errado.
+A ponte é exclusivamente de saída: usa `sendMessage`, não abre porta pública,
+não consulta `getUpdates`, não recebe callbacks e não aceita comandos de shell.
+Falha de rede não altera o estado terminal. Execute somente uma ponte por bot:
+ela varre os runs de todos os projetos e mantém uma trava local por token. Uma
+segunda instância, mesmo configurada com outro state root, encerra antes de
+duplicar entregas.
 
-Ao abrir o gate, o Telegram recebe ID/título, repositório, base, iteração, hash,
+Ao concluir o run, o Telegram recebe ID/título, repositório, base, iteração, hash,
 arquivos, estatísticas, executor, testes/validações, reviewer, findings, riscos
 e documentação — nunca o diff completo. Texto não usa `parse_mode`, URLs e
 atribuições sensíveis são redigidas e campos grandes são truncados
-explicitamente. Mensagens longas são numeradas; apenas a última tem botões.
+explicitamente. Mensagens longas são numeradas e nenhuma contém botões.
 Cada `message_id` é persistido depois da resposta bem-sucedida do Telegram,
 reduzindo reenvios. A semântica permanece *at-least-once*: uma queda entre envio
-e persistência, reinício com offset apenas em memória ou duas pontes concorrentes
-pode duplicar updates ou mensagens.
+e persistência pode duplicar uma mensagem.
 
 ```text
 (1/1)
@@ -166,7 +159,7 @@ Documentação:
 - README.md
 - docs/tasks/TASK-01.md
 
-[Aprovar alterações] [Rejeitar]
+Run finalizada. A integração permanece manual.
 ```
 
 ## systemd --user
@@ -187,7 +180,7 @@ liberação de escrita somente para o state root.
 
 ### Limite intencional da unidade
 
-A ponte registra somente a decisão. Ela não executa Git e não escreve no
+A ponte registra somente a entrega da notificação. Ela não executa Git e não escreve no
 repositório. O `EnvironmentFile` coloca o token do
 bot somente nesse processo; não existe worker de push no produto estável.
 
@@ -202,10 +195,9 @@ mutação. A ordem quando há composição é
 - `EXECUTING`: Cursor trabalhando;
 - `REVIEWING`: Codex avaliando;
 - `CHANGES_REQUESTED`: feedback retornará ao Cursor;
-- `APPROVED`: aceite técnico, nunca humano;
-- `AWAITING_HUMAN_APPROVAL`: botão pendente;
-- `HUMAN_APPROVED`: decisão autenticada para o hash revisado; terminal no fluxo
-  atual, aguardando integração manual;
+- `APPROVED`: aceite técnico terminal, aguardando integração manual;
+- `AWAITING_HUMAN_APPROVAL` e `HUMAN_APPROVED`: estados legados, aceitos somente
+  para migração/verificação de runs antigos;
 - `BLOCKED`: falha, interrupção, dependência externa ou limite atingido.
 
 Quando a causa for exclusivamente `max_review_iterations`, a notificação
@@ -217,8 +209,8 @@ CLI explícita:
   --additional-iterations 3
 ```
 
-Não há botão Telegram nesta versão. Isso evita autorização parcial sem o mesmo
-protocolo de `.resume.lock`, estado atômico e idempotência da CLI.
+Não há botão nem decisão humana pelo Telegram. A integração continua sendo uma
+ação manual separada.
 
 Interrupções `INT`, `TERM` e `HUP` marcam runs ativos como `BLOCKED` e preservam
 o worktree. Quando Telegram está habilitado, também enfileiram uma notificação
@@ -228,17 +220,15 @@ notificação substituída durante envio.
 ```text
 APPROVED
   ├─ mode=none     → verify → integração Git manual
-  └─ mode=telegram → AWAITING_HUMAN_APPROVAL
-                       ├─ Rejeitar → BLOCKED
-                       └─ Aprovar  → HUMAN_APPROVED
-                                         └─ verify → integração Git manual
+  └─ mode=telegram → enfileira notificação sem ações
+                     → verify → integração Git manual
 
 CHANGES_REQUESTED em N = limite
   → BLOCKED/max_review_iterations
   → autorização atômica em state.json.iteration_budget
   → CHANGES_REQUESTED
   → executor em N+1 com o review-N.json
-  → validações → reviewer → gate humano normal ou novo limite
+  → validações → reviewer → APPROVED ou novo limite
 ```
 
 FIFO/socket/device são recusados no snapshot; artefatos operacionais precisam

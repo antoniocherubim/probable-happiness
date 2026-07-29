@@ -48,21 +48,21 @@ preflight.
 Quando `documentation.required = true`, cada caminho renderizado deve ter sido
 criado ou alterado no snapshot final. O executor recebe instrução para registrar
 comportamento, testes e riscos; o reviewer valida a precisão. Ausência bloqueia
-o gate humano. O loop não edita documentação por heurística e não exige SHA ou
+o aceite técnico. O loop não edita documentação por heurística e não exige SHA ou
 URL de uma branch que ainda não existe.
 
-## Aprovação local ou Telegram
+## Conclusão local ou notificação Telegram
 
 Com `approval.mode = "none"`, um review técnico válido termina em `APPROVED`,
-sem request/outbox Telegram. Com `telegram`, a decisão termina em
-`HUMAN_APPROVED`. Ambos preservam o worktree. A integração é uma ação local
-explícita e separada:
+sem outbox Telegram. Com `telegram`, também termina em `APPROVED` e enfileira
+uma mensagem terminal sem botões ou ações. Ambos preservam o worktree. A
+integração é uma ação local explícita e separada:
 
 ```bash
 agent-loop integrate --run-dir /state/projects/<repo-id>/runs/<run-id>
 ```
 
-O comando exige aprovação válida, snapshot intacto, manifesto correspondente,
+O comando exige aceite técnico válido, snapshot intacto, manifesto correspondente,
 checkout limpo e `HEAD` no commit-base; então cria um commit pelo index
 temporário e faz fast-forward com hooks desativados. Não há fetch, pull, push,
 branch remota ou conexão Git. `agent-loop verify --run-dir ...` permanece como
@@ -138,9 +138,9 @@ REVIEWING/interrompido  -> nova revisão do snapshot pré-revisão
 CHANGES_REQUESTED       -> executor da próxima iteração
 BLOCKED + --review-only -> nova revisão do snapshot atual
 BLOCKED/max_review_iterations + orçamento explícito -> executor em N+1
-AWAITING_HUMAN_APPROVAL -> apenas retoma wait-decision
-HUMAN_APPROVED          -> valida decisão/hash; não repete gate
-APPROVED + mode=none    -> valida manifesto/hash; não repete review
+AWAITING_HUMAN_APPROVAL -> migra run legado para APPROVED
+HUMAN_APPROVED          -> valida decisão/hash legado
+APPROVED                -> valida manifesto/hash; não repete review
 ```
 
 ```bash
@@ -152,9 +152,8 @@ APPROVED + mode=none    -> valida manifesto/hash; não repete review
 
 O wrapper mantém `.resume.lock` durante toda a retomada. Antes de iniciar,
 valida metadados, task no base commit, `HEAD`, repositório comum do worktree,
-perfil congelado e hash pré-revisão. Drift durante/depois da revisão ou no gate
-humano é recusado. Em modo `telegram`, um `APPROVED` isolado volta a uma nova
-revisão; em modo `none`, ele só é terminal com manifesto técnico válido.
+perfil congelado e hash pré-revisão. Drift durante/depois da revisão é recusado.
+Nos dois modos, `APPROVED` só é terminal com manifesto técnico válido.
 
 ### Orçamento de iterações
 
@@ -169,7 +168,7 @@ exige simultaneamente:
   `CHANGES_REQUESTED`;
 - resultado do reviewer concluído, executor report presente e worktree igual ao
   `review-N-snapshot.json`;
-- ausência de artefatos de aprovação e locks concorrentes.
+- ausência de artefatos terminais e locks concorrentes.
 
 O campo `iteration_budget` de `state.json` contém `schema_version`, `run_id`,
 limites original e efetivo e uma cadeia de extensões. Cada item registra
@@ -196,7 +195,8 @@ permanece exclusivamente na CLI para evitar uma segunda superfície.
 A origem é aberta com `O_NOFOLLOW`, deve ser regular e ter no máximo 1 MiB.
 FIFO, socket, device, symlink, troca de inode e destino adulterado são recusados.
 A cópia recebe nome pelo SHA-256, modo `0600`, timestamp e `trust = "untrusted"`.
-Anexar não altera status. Somente uma nova revisão pode abrir o gate humano.
+Anexar não altera status. Somente uma nova revisão pode produzir um novo aceite
+técnico.
 
 ## Riscos residuais
 

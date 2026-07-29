@@ -1,5 +1,5 @@
 [Unit]
-Description=Codex Cursor agent-loop Telegram bridge
+Description=Codex Cursor agent-loop Telegram notifier
 After=network-online.target
 Wants=network-online.target
 

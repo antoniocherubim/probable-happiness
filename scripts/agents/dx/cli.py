@@ -15,20 +15,18 @@ from pathlib import Path
 from .approval import (
     ApprovalError,
     compute_diff_hash,
-    create_approval_request,
     enqueue_notification,
     verify_reviewed_snapshot,
-    wait_for_decision,
 )
 from .bridge import (
     BRIDGE_ALREADY_RUNNING_EXIT,
     Bridge,
     BridgeAlreadyRunning,
     bridge_instance_lock,
-    build_awaiting_summary,
+    build_approved_summary,
     build_blocked_summary,
 )
-from .config import ConfigError, human_approval_timeout_sec, load_bridge_config
+from .config import ConfigError, load_bridge_config
 from .atomic import atomic_write_json
 from .integration import IntegrationError, integrate_reviewed_snapshot
 from .paths import (
@@ -69,7 +67,7 @@ from .state_machine import (
     transition_run,
 )
 from .systemd_scope import SystemdScopeError
-from .telegram import TelegramClient, TelegramPollingConflict
+from .telegram import TelegramClient
 
 
 RUNNER_TRANSITION_EVENTS = (
@@ -150,21 +148,8 @@ def cmd_compute_diff_hash(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_create_request(args: argparse.Namespace) -> int:
-    try:
-        request = create_approval_request(
-            run_dir=Path(args.run_dir),
-            task=args.task,
-            base_commit=args.base_commit,
-            worktree=Path(args.worktree),
-            review_report=args.review_report,
-            diff_hash=args.diff_hash,
-            task_id=args.task_id,
-        )
-    except ApprovalError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 1
-    summary = build_awaiting_summary(request["task_id"], args.review_report)
+def cmd_notify_approved(args: argparse.Namespace) -> int:
+    summary = build_approved_summary(args.task_id, args.review_report)
     messages = None
     summary_path = Path(args.run_dir) / SUMMARY_FILENAME
     if summary_path.is_file():
@@ -174,18 +159,21 @@ def cmd_create_request(args: argparse.Namespace) -> int:
             if isinstance(configured, list) and configured and all(
                 isinstance(item, str) for item in configured
             ):
-                messages = configured
+                messages = list(configured)
+                messages[-1] += (
+                    "\n\nRun finalizada. A integração permanece manual."
+                )
                 summary = configured[0]
         except (OSError, UnicodeError, json.JSONDecodeError):
             messages = None
     enqueue_notification(
         run_dir=Path(args.run_dir),
-        kind="awaiting_human_approval",
+        kind="approved",
         summary=summary,
         report_hint=Path(args.review_report).name,
         messages=messages,
     )
-    print(request["run_id"])
+    print(Path(args.run_dir).name)
     return 0
 
 
@@ -198,12 +186,6 @@ def cmd_notify_blocked(args: argparse.Namespace) -> int:
         report_hint=args.report_hint or "",
     )
     return 0
-
-
-def cmd_wait_decision(args: argparse.Namespace) -> int:
-    timeout = args.timeout if args.timeout is not None else human_approval_timeout_sec()
-    ok = wait_for_decision(Path(args.run_dir), timeout_sec=timeout, poll_interval=args.poll_interval)
-    return 0 if ok else 2
 
 
 def cmd_verify_reviewed_snapshot(args: argparse.Namespace) -> int:
@@ -681,21 +663,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
     try:
         with bridge_instance_lock(config):
             logging.getLogger("agent_dx.bridge").info(
-                "serving runs_root=%s allowlist_user=%s allowlist_chat=%s",
+                "serving outbound notifications runs_root=%s chat=%s",
                 runs_root,
-                config.allowed_user_id,
                 config.allowed_chat_id,
             )
             bridge.run_forever(max_cycles=args.max_cycles)
     except BridgeAlreadyRunning as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
-        return BRIDGE_ALREADY_RUNNING_EXIT
-    except TelegramPollingConflict as exc:
-        print(
-            f"ERROR: Telegram polling conflict: {exc}. "
-            "Stop the other bot consumer before restarting this bridge.",
-            file=sys.stderr,
-        )
         return BRIDGE_ALREADY_RUNNING_EXIT
     except OSError as exc:
         print(f"ERROR: could not establish Telegram bridge singleton: {exc}", file=sys.stderr)
@@ -704,7 +678,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Agent-loop Telegram / human-approval helpers")
+    parser = argparse.ArgumentParser(description="Agent-loop state and Telegram notification helpers")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("project-state-dir", help="Resolve collision-safe external state for a repository")
@@ -724,15 +698,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--base-commit", required=True)
     p.set_defaults(func=cmd_compute_diff_hash)
 
-    p = sub.add_parser("create-request", help="Write approval request + awaiting notify outbox")
+    p = sub.add_parser("notify-approved", help="Enqueue terminal APPROVED notification")
     p.add_argument("--run-dir", required=True)
-    p.add_argument("--task", required=True)
-    p.add_argument("--base-commit", required=True)
-    p.add_argument("--worktree", required=True)
     p.add_argument("--review-report", required=True)
-    p.add_argument("--diff-hash", default=None)
-    p.add_argument("--task-id", default=None)
-    p.set_defaults(func=cmd_create_request)
+    p.add_argument("--task-id", required=True)
+    p.set_defaults(func=cmd_notify_approved)
 
     p = sub.add_parser("notify-blocked", help="Enqueue BLOCKED/failure notification (no button)")
     p.add_argument("--run-dir", required=True)
@@ -740,12 +710,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--report-hint", default="")
     p.add_argument("--kind", choices=("blocked", "failure"), default="blocked")
     p.set_defaults(func=cmd_notify_blocked)
-
-    p = sub.add_parser("wait-decision", help="Wait for human approval decision")
-    p.add_argument("--run-dir", required=True)
-    p.add_argument("--timeout", type=int, default=None)
-    p.add_argument("--poll-interval", type=float, default=1.0)
-    p.set_defaults(func=cmd_wait_decision)
 
     p = sub.add_parser(
         "verify-reviewed-snapshot",
@@ -765,7 +729,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--message", default=None)
     p.set_defaults(func=cmd_integrate_reviewed_snapshot)
 
-    p = sub.add_parser("serve", help="Long-poll Telegram bridge")
+    p = sub.add_parser("serve", help="Send queued Telegram notifications")
     p.add_argument("--runs-root", default=None)
     p.add_argument("--max-cycles", type=int, default=None, help="Stop after N cycles (tests)")
     p.set_defaults(func=cmd_serve)
@@ -775,7 +739,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--missing-policy", choices=("allow", "deny"), default="allow")
     p.set_defaults(func=cmd_profile)
 
-    p = sub.add_parser("approval-mode", help="Print the configured approval adapter")
+    p = sub.add_parser("approval-mode", help="Print the configured notification mode")
     p.add_argument("--repo", required=True)
     p.add_argument("--missing-policy", choices=("allow", "deny"), default="allow")
     p.set_defaults(func=cmd_approval_mode)

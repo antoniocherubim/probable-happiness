@@ -15,11 +15,7 @@ sys.path.insert(0, str(AGENTS_DIR))
 
 from dx.approval import (  # noqa: E402
     STATUS_APPROVED,
-    STATUS_AWAITING,
-    STATUS_HUMAN_APPROVED,
-    create_approval_request,
     enqueue_notification,
-    load_decision,
     read_status,
 )
 from dx.bridge import (  # noqa: E402
@@ -32,10 +28,8 @@ from dx.cli import cmd_serve  # noqa: E402
 from dx.config import BridgeConfig, ConfigError, load_bridge_config  # noqa: E402
 from dx.state_machine import RunEvent, transition_run  # noqa: E402
 from dx.telegram import (  # noqa: E402
-    FakeHttpResponse,
     FakeTelegramAPI,
     TelegramClient,
-    TelegramPollingConflict,
 )
 
 
@@ -56,11 +50,11 @@ def mark_review_approved(run_dir: Path) -> None:
     [
         (
             "https://api.telegram.org",
-            f"https://api.telegram.org/bot{TOKEN}/getUpdates",
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
         ),
         (
             "https://telegram-proxy.test/api/",
-            f"https://telegram-proxy.test/api/bot{TOKEN}/getUpdates",
+            f"https://telegram-proxy.test/api/bot{TOKEN}/sendMessage",
         ),
     ],
 )
@@ -70,7 +64,7 @@ def test_api_url_keeps_base_when_bot_token_contains_colon(
 ) -> None:
     client = TelegramClient(TOKEN, api_base=api_base)
 
-    assert client._url("getUpdates") == expected
+    assert client._url("sendMessage") == expected
 
 
 @pytest.fixture
@@ -101,25 +95,16 @@ def bridge_env(tmp_path: Path, git_worktree: tuple[Path, str]) -> dict:
     run_dir = runs_root / "dx-01-bridge"
     run_dir.mkdir(parents=True)
     mark_review_approved(run_dir)
-    request = create_approval_request(
-        run_dir=run_dir,
-        task="docs/tasks/DX-01.md",
-        base_commit=base,
-        worktree=worktree,
-        review_report="review-1.json",
-    )
     enqueue_notification(
         run_dir=run_dir,
-        kind="awaiting_human_approval",
-        summary="awaiting",
+        kind="approved",
+        summary="technical review approved; integration remains manual",
         report_hint="review-1.json",
     )
     fake = FakeTelegramAPI(allowed_token=TOKEN)
     config = BridgeConfig(
         bot_token=TOKEN,
-        allowed_user_id=ALLOWED_USER,
         allowed_chat_id=ALLOWED_CHAT,
-        poll_timeout_sec=1,
     )
     client = TelegramClient(TOKEN, api_base="http://telegram.test", transport=fake.as_transport())
     bridge = Bridge(config, client, runs_root)
@@ -127,19 +112,17 @@ def bridge_env(tmp_path: Path, git_worktree: tuple[Path, str]) -> dict:
         "bridge": bridge,
         "fake": fake,
         "run_dir": run_dir,
-        "request": request,
         "worktree": worktree,
         "base": base,
         "runs_root": runs_root,
     }
 
 
-def test_config_rejects_non_numeric_identity(tmp_path: Path) -> None:
+def test_config_rejects_non_numeric_chat_id(tmp_path: Path) -> None:
     cred = tmp_path / "creds.env"
     cred.write_text(
         "AGENT_TELEGRAM_BOT_TOKEN=x\n"
-        "AGENT_TELEGRAM_ALLOWED_USER_ID=@someone\n"
-        "AGENT_TELEGRAM_ALLOWED_CHAT_ID=1\n",
+        "AGENT_TELEGRAM_ALLOWED_CHAT_ID=@channel\n",
         encoding="utf-8",
     )
     with pytest.raises(ConfigError):
@@ -154,14 +137,13 @@ def test_config_redacts_token(tmp_path: Path) -> None:
     cred = tmp_path / "creds.env"
     cred.write_text(
         "AGENT_TELEGRAM_BOT_TOKEN=abcdefghijklmnop\n"
-        "AGENT_TELEGRAM_ALLOWED_USER_ID=1\n"
         "AGENT_TELEGRAM_ALLOWED_CHAT_ID=1\n",
         encoding="utf-8",
     )
     cfg = load_bridge_config({"AGENT_TELEGRAM_CREDENTIALS_FILE": str(cred)})
     redacted = cfg.redacted()
     assert "abcdefghijklmnop" not in json.dumps(redacted)
-    assert redacted["allowed_user_id"] == 1
+    assert redacted["allowed_chat_id"] == 1
 
 
 def test_only_one_bridge_per_bot_even_for_different_state_roots(tmp_path: Path) -> None:
@@ -170,12 +152,10 @@ def test_only_one_bridge_per_bot_even_for_different_state_roots(tmp_path: Path) 
     environ = {"XDG_RUNTIME_DIR": str(runtime_dir)}
     first = BridgeConfig(
         bot_token=TOKEN,
-        allowed_user_id=ALLOWED_USER,
         allowed_chat_id=ALLOWED_CHAT,
     )
     second = BridgeConfig(
         bot_token=TOKEN,
-        allowed_user_id=ALLOWED_USER,
         allowed_chat_id=ALLOWED_CHAT,
         runs_root=tmp_path / "some-other-state-root",
     )
@@ -183,7 +163,7 @@ def test_only_one_bridge_per_bot_even_for_different_state_roots(tmp_path: Path) 
     with bridge_instance_lock(first, environ=environ) as lock_path:
         assert lock_path.is_file()
         assert f"pid={os.getpid()}" in lock_path.read_text(encoding="ascii")
-        with pytest.raises(BridgeAlreadyRunning, match="already polling"):
+        with pytest.raises(BridgeAlreadyRunning, match="already using"):
             with bridge_instance_lock(second, environ=environ):
                 pytest.fail("a duplicate bridge acquired the bot lock")
 
@@ -195,8 +175,8 @@ def test_different_bots_can_use_the_same_runtime_directory(tmp_path: Path) -> No
     runtime_dir = tmp_path / "runtime"
     runtime_dir.mkdir(mode=0o700)
     environ = {"XDG_RUNTIME_DIR": str(runtime_dir)}
-    first = BridgeConfig(TOKEN, ALLOWED_USER, ALLOWED_CHAT)
-    second = BridgeConfig("987654:OTHER-BOT", ALLOWED_USER, ALLOWED_CHAT)
+    first = BridgeConfig(TOKEN, ALLOWED_CHAT)
+    second = BridgeConfig("987654:OTHER-BOT", ALLOWED_CHAT)
 
     with bridge_instance_lock(first, environ=environ):
         with bridge_instance_lock(second, environ=environ):
@@ -212,9 +192,8 @@ def test_serve_refuses_duplicate_before_polling(
     runtime_dir.mkdir(mode=0o700)
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_dir))
     monkeypatch.setenv("AGENT_TELEGRAM_BOT_TOKEN", TOKEN)
-    monkeypatch.setenv("AGENT_TELEGRAM_ALLOWED_USER_ID", str(ALLOWED_USER))
     monkeypatch.setenv("AGENT_TELEGRAM_ALLOWED_CHAT_ID", str(ALLOWED_CHAT))
-    config = BridgeConfig(TOKEN, ALLOWED_USER, ALLOWED_CHAT)
+    config = BridgeConfig(TOKEN, ALLOWED_CHAT)
 
     with bridge_instance_lock(config):
         result = cmd_serve(
@@ -222,179 +201,31 @@ def test_serve_refuses_duplicate_before_polling(
         )
 
     assert result == BRIDGE_ALREADY_RUNNING_EXIT
-    assert "already polling this Telegram bot" in capsys.readouterr().err
+    assert "already using this Telegram bot" in capsys.readouterr().err
 
 
-def test_telegram_get_updates_409_is_a_fatal_polling_conflict() -> None:
-    class ConflictTransport:
-        def request(self, *_args: object, **_kwargs: object) -> FakeHttpResponse:
-            return FakeHttpResponse(
-                status=409,
-                body=json.dumps(
-                    {
-                        "ok": False,
-                        "description": "terminated by other getUpdates request",
-                    }
-                ).encode(),
-            )
-
-    client = TelegramClient(TOKEN, transport=ConflictTransport())
-
-    with pytest.raises(TelegramPollingConflict, match="another consumer"):
-        client.get_updates(timeout=1)
-
-
-def test_bridge_tolerates_one_restart_conflict_then_fails_closed(
-    tmp_path: Path,
-) -> None:
-    class ConflictTransport:
-        def request(self, *_args: object, **_kwargs: object) -> FakeHttpResponse:
-            return FakeHttpResponse(
-                status=409,
-                body=json.dumps({"ok": False, "description": "conflict"}).encode(),
-            )
-
-    config = BridgeConfig(TOKEN, ALLOWED_USER, ALLOWED_CHAT, poll_timeout_sec=1)
-    bridge = Bridge(
-        config,
-        TelegramClient(TOKEN, transport=ConflictTransport()),
-        tmp_path,
-    )
-
-    assert bridge.process_updates_once() == 0
-    with pytest.raises(TelegramPollingConflict):
-        bridge.process_updates_once()
-
-
-def test_authorized_callback_approves(bridge_env: dict) -> None:
+def test_terminal_notification_has_no_buttons_or_human_state(bridge_env: dict) -> None:
     bridge: Bridge = bridge_env["bridge"]
     fake: FakeTelegramAPI = bridge_env["fake"]
-    request = bridge_env["request"]
     run_dir: Path = bridge_env["run_dir"]
 
     assert bridge.process_outbox_once() == 1
-    assert fake.sent_messages
-    markup = fake.sent_messages[0]["reply_markup"]
-    assert markup["inline_keyboard"][0][0]["callback_data"] == request["callback_token"]
-
-    fake.push_callback(
-        user_id=ALLOWED_USER,
-        chat_id=ALLOWED_CHAT,
-        data=request["callback_token"],
-        callback_query_id="cb-ok",
-    )
-    assert bridge.process_updates_once() == 1
-    assert read_status(run_dir) == STATUS_HUMAN_APPROVED
-    assert load_decision(run_dir)["diff_hash"] == request["diff_hash"]
+    assert len(fake.sent_messages) == 1
+    assert "reply_markup" not in fake.sent_messages[0]
+    assert read_status(run_dir) == STATUS_APPROVED
+    assert not (run_dir / "human_approval_request.json").exists()
 
 
-def test_unauthorized_sender_cannot_approve(bridge_env: dict) -> None:
+def test_bridge_run_forever_delivers_outbox_without_inbound_api(bridge_env: dict) -> None:
     bridge: Bridge = bridge_env["bridge"]
     fake: FakeTelegramAPI = bridge_env["fake"]
-    request = bridge_env["request"]
-    run_dir: Path = bridge_env["run_dir"]
 
-    fake.push_callback(
-        user_id=OTHER_USER,
-        chat_id=OTHER_USER,
-        data=request["callback_token"],
-        callback_query_id="cb-bad",
-    )
-    bridge.process_updates_once()
-    assert read_status(run_dir) == STATUS_AWAITING
-    assert load_decision(run_dir) is None
-    # Neutral ack — no run paths in callback answers for strangers.
-    assert fake.answered_callbacks
-    assert "dx-01" not in json.dumps(fake.answered_callbacks).lower()
-    assert str(run_dir) not in json.dumps(fake.answered_callbacks)
+    bridge.run_forever(max_cycles=1)
+
+    assert len(fake.sent_messages) == 1
 
 
-def test_unauthorized_message_is_neutral(bridge_env: dict) -> None:
-    bridge: Bridge = bridge_env["bridge"]
-    fake: FakeTelegramAPI = bridge_env["fake"]
-    run_dir: Path = bridge_env["run_dir"]
-    fake.push_message(user_id=OTHER_USER, chat_id=OTHER_USER, text="/start")
-    bridge.process_updates_once()
-    assert fake.sent_messages
-    body = fake.sent_messages[-1]["text"]
-    assert body == "OK."
-    assert "agents" not in body
-    assert run_dir.name not in body
-
-
-def test_replay_and_foreign_callback(bridge_env: dict, tmp_path: Path) -> None:
-    bridge: Bridge = bridge_env["bridge"]
-    fake: FakeTelegramAPI = bridge_env["fake"]
-    request = bridge_env["request"]
-    run_dir: Path = bridge_env["run_dir"]
-    worktree: Path = bridge_env["worktree"]
-    base: str = bridge_env["base"]
-
-    fake.push_callback(
-        user_id=ALLOWED_USER,
-        chat_id=ALLOWED_CHAT,
-        data=request["callback_token"],
-        callback_query_id="cb-1",
-    )
-    bridge.process_updates_once()
-    assert read_status(run_dir) == STATUS_HUMAN_APPROVED
-
-    # Replay same callback — idempotent, state unchanged.
-    decision = load_decision(run_dir)
-    fake.push_callback(
-        user_id=ALLOWED_USER,
-        chat_id=ALLOWED_CHAT,
-        data=request["callback_token"],
-        callback_query_id="cb-1-replay",
-    )
-    bridge.process_updates_once()
-    assert load_decision(run_dir) == decision
-
-    # Other run token must not alter this run.
-    other = bridge_env["runs_root"] / "other-run"
-    other.mkdir()
-    mark_review_approved(other)
-    other_req = create_approval_request(
-        run_dir=other,
-        task="docs/tasks/OTHER.md",
-        base_commit=base,
-        worktree=worktree,
-        review_report="other.json",
-    )
-    fake.push_callback(
-        user_id=ALLOWED_USER,
-        chat_id=ALLOWED_CHAT,
-        data=other_req["callback_token"],
-        callback_query_id="cb-other",
-    )
-    bridge.process_updates_once()
-    assert load_decision(run_dir) == decision
-    assert read_status(other) == STATUS_HUMAN_APPROVED
-
-
-def test_worktree_drift_still_approves_reviewed_hash_via_bridge(bridge_env: dict) -> None:
-    """Callback approves the immutable reviewed hash; live drift is a planner verify concern."""
-    from dx.approval import verify_reviewed_snapshot
-
-    bridge: Bridge = bridge_env["bridge"]
-    fake: FakeTelegramAPI = bridge_env["fake"]
-    request = bridge_env["request"]
-    run_dir: Path = bridge_env["run_dir"]
-    worktree: Path = bridge_env["worktree"]
-    (worktree / "f.txt").write_text("tampered\n", encoding="utf-8")
-    fake.push_callback(
-        user_id=ALLOWED_USER,
-        chat_id=ALLOWED_CHAT,
-        data=request["callback_token"],
-        callback_query_id="cb-hash",
-    )
-    bridge.process_updates_once()
-    assert read_status(run_dir) == STATUS_HUMAN_APPROVED
-    assert load_decision(run_dir)["diff_hash"] == request["diff_hash"]
-    assert verify_reviewed_snapshot(run_dir)["matches"] is False
-
-
-def test_api_failure_does_not_approve(bridge_env: dict) -> None:
+def test_api_failure_keeps_terminal_notification_pending(bridge_env: dict) -> None:
     bridge: Bridge = bridge_env["bridge"]
     fake: FakeTelegramAPI = bridge_env["fake"]
     run_dir: Path = bridge_env["run_dir"]
@@ -402,17 +233,7 @@ def test_api_failure_does_not_approve(bridge_env: dict) -> None:
     assert bridge.process_outbox_once() == 0
     notify = json.loads((run_dir / "telegram_notify.json").read_text(encoding="utf-8"))
     assert notify["sent_at"] is None
-    assert read_status(run_dir) == STATUS_AWAITING
-    assert load_decision(run_dir) is None
-
-
-def test_api_timeout_does_not_approve(bridge_env: dict) -> None:
-    bridge: Bridge = bridge_env["bridge"]
-    fake: FakeTelegramAPI = bridge_env["fake"]
-    run_dir: Path = bridge_env["run_dir"]
-    fake.timeout_methods.add("getUpdates")
-    assert bridge.process_updates_once() == 0
-    assert read_status(run_dir) == STATUS_AWAITING
+    assert read_status(run_dir) == STATUS_APPROVED
 
 
 def test_blocked_notification_without_button(bridge_env: dict) -> None:

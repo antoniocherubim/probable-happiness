@@ -78,14 +78,6 @@ block_run() {
   notify_terminal_failure "$reason" "$report_hint" failure
 }
 
-fail_human_approval_setup() {
-  local reason="$1"
-  local review_report="$2"
-  block_run "$reason" "human_approval" "$(basename "$review_report")" "human_approval_setup"
-  note "human approval setup failed; status=BLOCKED; worktree preserved: $WORKTREE"
-  exit 1
-}
-
 handle_loop_signal() {
   local signal_name="$1"
   local exit_code="$2"
@@ -96,7 +88,7 @@ handle_loop_signal() {
       current_status="$(read_run_status)"
     fi
     case "$current_status" in
-      HUMAN_APPROVED|BLOCKED) ;;
+      APPROVED|HUMAN_APPROVED|BLOCKED) ;;
       *)
         block_run "Agent loop interrupted by $signal_name" "${CURRENT_PHASE:-loop}" "" "${CURRENT_PHASE:-loop}_interrupted"
         ;;
@@ -131,67 +123,33 @@ allocate_exclusive_run_dir() {
   printf '%s\n' "$candidate"
 }
 
-await_human_approval() {
+finalize_reviewed_run() {
   local review_report="$1"
   local reviewed_diff_hash="${2:-}"
-  local timeout_sec="${AGENT_HUMAN_APPROVAL_TIMEOUT_SEC:-3600}"
-  local create_rc
-  local wait_rc
+  local task_id="${TASK_ID:-$(basename "$TASK_FILE")}"
+  task_id="${task_id%.*}"
 
-  note "technical APPROVED; opening human approval gate"
-
-  if [[ -z "${reviewed_diff_hash}" || "${#reviewed_diff_hash}" -lt 32 ]]; then
-    fail_human_approval_setup \
-      "Human approval gate missing reviewed diff hash from Codex snapshot" \
-      "$review_report"
-  fi
-
-  # Technical APPROVED was recorded after the reviewer report was validated.
-  # The gate transitions only
-  # APPROVED → AWAITING_HUMAN_APPROVAL; never from BLOCKED / HUMAN_APPROVED / other.
   transition_run_state "review_approved"
-  set +e
-  DX_CLI create-request \
-    --run-dir "$RUN_DIR" \
-    --task "$TASK_FILE" \
-    --task-id "$TASK_ID" \
-    --base-commit "$BASE_COMMIT" \
-    --worktree "$WORKTREE" \
-    --review-report "$review_report" \
-    --diff-hash "$reviewed_diff_hash" \
-    >/dev/null
-  create_rc=$?
-  set -e
-  if [[ "$create_rc" -ne 0 ]]; then
-    fail_human_approval_setup \
-      "Human approval gate failed while creating approval request" \
-      "$review_report"
+  DX_CLI verify-reviewed-snapshot --run-dir "$RUN_DIR" >/dev/null || \
+    die "terminal reviewed snapshot verification failed"
+
+  if [[ "$APPROVAL_MODE" == "telegram" ]]; then
+    if ! DX_CLI notify-approved \
+      --run-dir "$RUN_DIR" \
+      --task-id "$task_id" \
+      --review-report "$review_report" \
+      >/dev/null; then
+      note "warning: failed to enqueue terminal Telegram notification"
+    fi
+    note "technical APPROVED finalized; Telegram notification queued without actions"
+  else
+    note "technical APPROVED finalized locally; Telegram is disabled"
   fi
 
-  note "status=AWAITING_HUMAN_APPROVAL; waiting up to ${timeout_sec}s for Telegram approval"
   note "reviewed diff_hash=${reviewed_diff_hash}"
-  note "review report: $review_report"
+  note "no commit or push was attempted; integrate the preserved worktree manually"
   note "worktree preserved: $WORKTREE"
-  note "HUMAN_APPROVED binds that immutable hash; planner must run verify-reviewed-snapshot before integrate"
-
-  set +e
-  DX_CLI wait-decision --run-dir "$RUN_DIR" --timeout "$timeout_sec"
-  wait_rc=$?
-  set -e
-
-  # Success is derived solely from wait-decision's validated decision (exit 0).
-  # Do not rewrite status here: timeout cleanup is lock-coordinated inside the
-  # helper so a concurrent claim cannot be downgraded by a non-atomic shell write.
-  if [[ "$wait_rc" -eq 0 ]]; then
-    note "human approval completed for reviewed diff_hash=${reviewed_diff_hash}"
-    note "no commit or push was attempted; integrate the preserved worktree manually"
-    note "worktree preserved: $WORKTREE"
-    exit 0
-  fi
-
-  note "human approval still pending (timeout or bridge unavailable); status=AWAITING_HUMAN_APPROVAL"
-  note "worktree preserved: $WORKTREE"
-  exit 2
+  exit 0
 }
 
 resolve_codex_bin() {
@@ -325,18 +283,10 @@ _run_task_entry() {
     exit 0
   fi
   if [[ -n "$RESUME_RUN_DIR" && "$START_PHASE" == "awaiting_human" ]]; then
-    note "resuming human approval wait without creating a new request"
-    set +e
-    DX_CLI wait-decision --run-dir "$RUN_DIR" --timeout "${AGENT_HUMAN_APPROVAL_TIMEOUT_SEC:-3600}"
-    WAIT_EXIT=$?
-    set -e
-    if [[ "$WAIT_EXIT" -eq 0 ]]; then
-      note "human approval completed; no commit or push was attempted"
-      note "integrate the preserved worktree manually: $WORKTREE"
-      exit 0
-    fi
-    note "human approval still pending; worktree preserved: $WORKTREE"
-    exit 2
+    note "migrating legacy pending human gate to terminal technical approval"
+    finalize_reviewed_run \
+      "$RUN_DIR/review-${START_ITERATION}.json" \
+      "$(DX_CLI compute-diff-hash --worktree "$WORKTREE" --base-commit "$BASE_COMMIT")"
   fi
 
   CURSOR_AGENT_BIN="$(resolve_cursor_agent_bin || true)"
@@ -622,17 +572,7 @@ _run_task_entry() {
             "$(basename "$REVIEW_FILE")" review_artifacts_invalid
           die "review artifacts are invalid; approval was not finalized"
         fi
-        if [[ "$APPROVAL_MODE" == "none" ]]; then
-          transition_run_state "review_approved"
-          DX_CLI verify-reviewed-snapshot --run-dir "$RUN_DIR" >/dev/null || \
-            die "terminal reviewed snapshot verification failed"
-          note "technical APPROVED finalized locally; Telegram is disabled"
-          note "reviewed diff_hash=${AFTER_HASH}"
-          note "no commit or push was attempted; integrate the preserved worktree manually"
-          note "worktree preserved: $WORKTREE"
-          exit 0
-        fi
-        await_human_approval "$REVIEW_FILE" "$AFTER_HASH"
+        finalize_reviewed_run "$REVIEW_FILE" "$AFTER_HASH"
         ;;
       CHANGES_REQUESTED)
         LATEST_FEEDBACK="$(<"$REVIEW_FILE")"

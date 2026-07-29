@@ -8,8 +8,9 @@ anterior; runs antigos não serão migrados.
 
 ## Objetivo
 
-Executar uma task em worktree Git isolada, revisar o resultado, pedir uma
-decisão humana opcional e preservar o snapshot aprovado para integração manual.
+Executar uma task em worktree Git isolada, revisar o resultado, enviar uma
+notificação Telegram opcional e preservar o snapshot aprovado para integração
+manual.
 
 Fluxo:
 
@@ -18,7 +19,7 @@ Fluxo:
 3. executar validações configuradas;
 4. revisar o diff com Codex;
 5. repetir somente dentro do orçamento de iterações autorizado;
-6. opcionalmente pedir aprovação pelo Telegram;
+6. opcionalmente enviar a conclusão pelo Telegram;
 7. verificar novamente o hash e preservar a worktree.
 
 ## Invariantes
@@ -57,7 +58,7 @@ Cada run novo tem um único `state.json` versionado contendo:
 - status atual;
 - falha estruturada, quando houver;
 - orçamento adicional, quando autorizado;
-- decisão humana, quando utilizada.
+- estado técnico terminal.
 
 Cursor de iteração, reports, manifestos e diffs continuam em arquivos separados.
 Os artefatos relevantes são vinculados por hash. Uma escrita incompleta nunca
@@ -81,7 +82,7 @@ antiga continua disponível para inspeção histórica.
 
 ### Adaptadores opcionais
 
-- Telegram para notificação e decisão humana;
+- Telegram para notificação terminal;
 - operação persistente por tmux/SSH.
 
 ### Removido
@@ -108,7 +109,7 @@ orçamento deve permanecer pequeno e ser estendido somente por decisão explíci
 
 ## Estado atual
 
-- `state.json` concentra metadata, status, falha, orçamento e decisão;
+- `state.json` concentra metadata, status, falha e orçamento;
 - todas as fases exigem scope `systemd --user` e cotas configuradas;
 - Telegram é opcional e nunca executa Git;
 - `resume` e `verify` revalidam o snapshot congelado;

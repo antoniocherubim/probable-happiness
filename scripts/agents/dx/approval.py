@@ -329,14 +329,12 @@ def enqueue_notification(
 
     Failure to deliver must not change approval state; this only stages a message.
 
-    For ``awaiting_human_approval``, publication is lock-coordinated and runs only
-    while the gate is still ``AWAITING_HUMAN_APPROVAL`` with a matching pending
-    request and no valid decision. Returns ``None`` when the button must not be
-    offered (e.g. callback won the race, or status is already ``HUMAN_APPROVED`` /
-    ``BLOCKED``).
+    ``approved`` is a terminal, outbound-only notification and never contains
+    callback data. ``awaiting_human_approval`` remains readable only for legacy
+    run artifacts created before Telegram approval was retired.
     """
     run_dir = Path(run_dir)
-    if kind not in {"awaiting_human_approval", "blocked", "failure"}:
+    if kind not in {"approved", "awaiting_human_approval", "blocked", "failure"}:
         raise ApprovalError(f"unsupported notify kind: {kind}")
 
     if kind == "awaiting_human_approval":
@@ -628,9 +626,9 @@ def verify_reviewed_snapshot(run_dir: Path) -> dict[str, Any]:
     Mandatory pre-integration check for the planner.
 
     Recomputes the live worktree hash and compares it to the frozen reviewed
-    hash. Telegram mode binds it through the request and human decision. With
-    ``approval.mode = "none"``, technical ``APPROVED`` binds it through the
-    reviewed manifest written before the terminal transition.
+    hash. New runs in both notification modes terminate at technical
+    ``APPROVED`` and bind through the reviewed manifest. Legacy
+    ``HUMAN_APPROVED`` runs remain verifiable through their recorded decision.
     """
     run_dir = Path(run_dir)
     status = read_status(run_dir)
@@ -639,8 +637,9 @@ def verify_reviewed_snapshot(run_dir: Path) -> dict[str, Any]:
         metadata = state.get("metadata") if state else None
         profile = metadata.get("profile") if isinstance(metadata, dict) else None
         approval = profile.get("approval") if isinstance(profile, dict) else None
-        if not isinstance(approval, dict) or approval.get("mode") != "none":
-            raise ApprovalError("technical APPROVED is terminal only when approval.mode is none")
+        mode = approval.get("mode") if isinstance(approval, dict) else None
+        if mode not in {"none", "telegram"}:
+            raise ApprovalError("terminal technical APPROVED has invalid notification mode")
         manifest_path = run_dir / "reviewed_manifest.json"
         try:
             manifest = read_json(manifest_path)
@@ -666,14 +665,14 @@ def verify_reviewed_snapshot(run_dir: Path) -> dict[str, Any]:
             "current_diff_hash": current,
             "matches": current == expected,
             "status": status,
-            "approval_mode": "none",
+            "approval_mode": mode,
             "worktree": str(worktree),
             "base_commit": base_commit,
         }
 
     if status != STATUS_HUMAN_APPROVED:
         raise ApprovalError(
-            "run is not HUMAN_APPROVED or terminal technical APPROVED"
+            "run is not terminal technical APPROVED or legacy HUMAN_APPROVED"
         )
     request = load_request(run_dir)
     decision = load_decision(run_dir)

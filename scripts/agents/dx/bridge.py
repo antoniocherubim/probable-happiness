@@ -1,44 +1,35 @@
-"""Long-polling Telegram bridge for agent-loop notifications and human approval."""
+"""Outbound-only Telegram notifier for terminal agent-loop messages."""
 
 from __future__ import annotations
 
 import fcntl
 import hashlib
-import json
 import logging
 import os
 import stat
 import tempfile
 import time
-from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
 from .approval import (
-    apply_human_approval,
-    apply_human_rejection,
-    find_run_dir_by_token,
     list_pending_notifications,
     mark_notification_message_sent,
     mark_notification_sent,
     truncate_message,
 )
 from .config import BridgeConfig
-from .telegram import TelegramClient, TelegramError, TelegramPollingConflict
+from .telegram import TelegramClient, TelegramError
 
 logger = logging.getLogger("agent_dx.bridge")
 
-NEUTRAL_UNAUTHORIZED = "OK."
-NEUTRAL_UNSUPPORTED = "Only the approval button is supported."
-NEUTRAL_GROUP = "OK."
 BRIDGE_ALREADY_RUNNING_EXIT = 73
-POLLING_CONFLICT_LIMIT = 2
-POLLING_CONFLICT_WINDOW_SEC = 120.0
+OUTBOX_POLL_INTERVAL_SEC = 1.0
 
 
 class BridgeAlreadyRunning(RuntimeError):
-    """Another local bridge already owns Telegram polling for this bot."""
+    """Another local notifier already owns delivery for this bot."""
 
 
 def _bridge_runtime_dir(environ: dict[str, str] | None = None) -> Path:
@@ -61,11 +52,11 @@ def bridge_instance_lock(
     environ: dict[str, str] | None = None,
 ) -> Iterator[Path]:
     """
-    Allow only one polling bridge per Telegram bot on this host.
+    Allow only one notifier per Telegram bot on this host.
 
     The lock intentionally lives outside ``runs_root``: two bridges pointed at
-    different state roots still compete for the same Telegram update stream and
-    can otherwise consume callbacks that only the other bridge can resolve.
+    different state roots could otherwise duplicate or inconsistently mark
+    outbound deliveries.
     """
     runtime_root = _bridge_runtime_dir(environ)
     lock_dir = runtime_root / "codex-cursor-agent-loop"
@@ -97,7 +88,7 @@ def bridge_instance_lock(
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise BridgeAlreadyRunning(
-                "another agent-loop bridge is already polling this Telegram bot; "
+                "another agent-loop notifier is already using this Telegram bot; "
                 "use one bridge for the shared state root"
             ) from exc
         os.ftruncate(fd, 0)
@@ -121,8 +112,6 @@ class Bridge:
         self.config = config
         self.client = client
         self.runs_root = Path(runs_root)
-        self._offset: int | None = None
-        self._polling_conflicts: deque[float] = deque()
 
     def process_outbox_once(self) -> int:
         """Send pending notifications. Telegram failures leave outbox unsent."""
@@ -182,33 +171,9 @@ class Bridge:
 
         notification_id = str(payload.get("notification_id") or "")
         for index in range(sent_count, len(messages)):
-            reply_markup = None
-            # Only the final chunk offers a decision; blocked/failure never do.
-            if (
-                index == len(messages) - 1
-                and kind == "awaiting_human_approval"
-                and payload.get("offer_approval_button")
-                and payload.get("callback_token")
-            ):
-                token = str(payload["callback_token"])
-                reply_markup = {
-                    "inline_keyboard": [
-                        [
-                            {
-                                "text": "Aprovar alterações",
-                                "callback_data": token[:64],
-                            },
-                            {
-                                "text": "Rejeitar",
-                                "callback_data": f"reject:{token}"[:64],
-                            },
-                        ]
-                    ]
-                }
             result = self.client.send_message(
                 self.config.allowed_chat_id,
                 messages[index],
-                reply_markup=reply_markup,
             )
             message_id = result.get("message_id")
             if type(message_id) is not int:
@@ -218,149 +183,20 @@ class Bridge:
                 return False
         return True
 
-    def process_updates_once(self) -> int:
-        try:
-            updates = self.client.get_updates(
-                offset=self._offset,
-                timeout=self.config.poll_timeout_sec,
-            )
-        except TelegramPollingConflict:
-            # One conflict can be the previous long poll draining immediately
-            # after a service restart. Repeated conflicts indicate a real
-            # competing consumer that can steal callbacks for another state root.
-            now = time.monotonic()
-            cutoff = now - POLLING_CONFLICT_WINDOW_SEC
-            while self._polling_conflicts and self._polling_conflicts[0] < cutoff:
-                self._polling_conflicts.popleft()
-            self._polling_conflicts.append(now)
-            if len(self._polling_conflicts) >= POLLING_CONFLICT_LIMIT:
-                raise
-            logger.warning("transient getUpdates conflict after restart; retrying once")
-            return 0
-        except TelegramError as exc:
-            logger.warning("getUpdates failed: %s", exc)
-            return 0
-
-        handled = 0
-        for update in updates:
-            update_id = int(update["update_id"])
-            self._offset = update_id + 1
-            try:
-                self._handle_update(update)
-            except TelegramError as exc:
-                logger.warning("update handling telegram error: %s", exc)
-            except Exception:
-                logger.exception("update handling failed")
-            handled += 1
-        return handled
-
-    def _handle_update(self, update: dict[str, Any]) -> None:
-        if "callback_query" in update:
-            self._handle_callback(update["callback_query"])
-            return
-        if "message" in update:
-            self._handle_message(update["message"])
-
-    def _handle_message(self, message: dict[str, Any]) -> None:
-        chat = message.get("chat") or {}
-        sender = message.get("from") or {}
-        chat_id = chat.get("id")
-        user_id = sender.get("id")
-        chat_type = chat.get("type")
-
-        if chat_type != "private":
-            # Ignore groups/channels; optional neutral ack only to allowlisted private chats.
-            return
-
-        if user_id != self.config.allowed_user_id or chat_id != self.config.allowed_chat_id:
-            # Neutral response — no paths, tasks, logs, or host state.
-            try:
-                self.client.send_message(int(chat_id), NEUTRAL_UNAUTHORIZED)
-            except (TypeError, TelegramError):
-                pass
-            return
-
-        # Authorized operator: still no free-text command execution surface.
-        self.client.send_message(int(chat_id), NEUTRAL_UNSUPPORTED)
-
-    def _handle_callback(self, callback: dict[str, Any]) -> None:
-        callback_id = str(callback.get("id") or "")
-        data = str(callback.get("data") or "")
-        sender = callback.get("from") or {}
-        message = callback.get("message") or {}
-        chat = message.get("chat") or {}
-        user_id = sender.get("id")
-        chat_id = chat.get("id")
-        chat_type = chat.get("type")
-
-        def answer(text: str | None = None) -> None:
-            if callback_id:
-                try:
-                    self.client.answer_callback_query(callback_id, text=text)
-                except TelegramError as exc:
-                    logger.warning("answerCallbackQuery failed: %s", exc)
-
-        if chat_type != "private":
-            answer(NEUTRAL_GROUP)
-            return
-
-        if user_id != self.config.allowed_user_id or chat_id != self.config.allowed_chat_id:
-            answer(NEUTRAL_UNAUTHORIZED)
-            return
-
-        rejecting = data.startswith("reject:")
-        token = data.removeprefix("reject:") if rejecting else data
-        run_dir = find_run_dir_by_token(self.runs_root, token)
-        if run_dir is None:
-            answer("Unknown or expired approval.")
-            return
-
-        if rejecting:
-            result = apply_human_rejection(
-                run_dir=run_dir,
-                callback_token=token,
-                telegram_user_id=int(user_id),
-                telegram_chat_id=int(chat_id),
-                allowed_user_id=self.config.allowed_user_id,
-                allowed_chat_id=self.config.allowed_chat_id,
-            )
-            if result == "rejected":
-                answer("Rejeitado. Nenhuma alteração foi integrada.")
-            elif result == "rejected_unauthorized":
-                answer(NEUTRAL_UNAUTHORIZED)
-            else:
-                answer("Rejection not applicable.")
-            return
-
-        result, _decision = apply_human_approval(
-            run_dir=run_dir,
-            callback_token=token,
-            telegram_user_id=int(user_id),
-            telegram_chat_id=int(chat_id),
-            allowed_user_id=self.config.allowed_user_id,
-            allowed_chat_id=self.config.allowed_chat_id,
-        )
-
-        if result in {"accepted", "idempotent_replay"}:
-            answer("Aprovado. Snapshot local preservado; integração e push são manuais.")
-            return
-        if result == "rejected_unauthorized":
-            answer(NEUTRAL_UNAUTHORIZED)
-            return
-        answer("Approval not applicable.")
-
     def run_forever(self, *, max_cycles: int | None = None) -> None:
         cycles = 0
         while max_cycles is None or cycles < max_cycles:
             self.process_outbox_once()
-            self.process_updates_once()
             cycles += 1
+            if max_cycles is None or cycles < max_cycles:
+                time.sleep(OUTBOX_POLL_INTERVAL_SEC)
 
 
-def build_awaiting_summary(task_id: str, review_report: str) -> str:
+def build_approved_summary(task_id: str, review_report: str) -> str:
     return truncate_message(
         f"Technical review APPROVED for {task_id}. "
-        f"Human gate pending. Review file: {Path(review_report).name}"
+        f"Run completed; integration remains manual. "
+        f"Review file: {Path(review_report).name}"
     )
 
 

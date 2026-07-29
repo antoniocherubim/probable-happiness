@@ -107,7 +107,10 @@ TRANSITIONS: dict[RunEvent, TransitionSpec] = {
         frozenset({RunState.REVIEWING}), RunState.CHANGES_REQUESTED
     ),
     RunEvent.REVIEW_APPROVED: TransitionSpec(
-        frozenset({RunState.REVIEWING}), RunState.APPROVED
+        # ``AWAITING_HUMAN_APPROVAL`` is accepted only to migrate legacy runs
+        # after the Telegram human gate was retired.
+        frozenset({RunState.REVIEWING, RunState.AWAITING_HUMAN_APPROVAL}),
+        RunState.APPROVED,
     ),
     RunEvent.APPROVAL_REQUESTED: TransitionSpec(
         frozenset({RunState.APPROVED}), RunState.AWAITING_HUMAN_APPROVAL
