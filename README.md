@@ -88,7 +88,9 @@ configure token e IDs numéricos fora do Git conforme
 Execute somente uma instância da ponte por bot. A ponte mantém uma trava local
 por token e recusa uma segunda instância, mesmo que ela aponte para outro state
 root. Se o próprio Telegram detectar um consumidor em outra máquina ou sessão,
-a ponte encerra com um erro de conflito em vez de disputar e perder callbacks.
+a ponte tolera um único conflito transitório durante restart, enquanto a
+requisição anterior se encerra. Reincidência em uma janela curta faz a ponte
+parar com diagnóstico explícito em vez de disputar e perder callbacks.
 Uma única ponte descobre runs de múltiplos projetos. O
 Telegram envia o resumo técnico em partes numeradas; somente a última contém os
 botões **Aprovar alterações** e **Rejeitar**. A aprovação registra apenas

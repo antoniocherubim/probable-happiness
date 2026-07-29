@@ -9,6 +9,8 @@ import logging
 import os
 import stat
 import tempfile
+import time
+from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -31,6 +33,8 @@ NEUTRAL_UNAUTHORIZED = "OK."
 NEUTRAL_UNSUPPORTED = "Only the approval button is supported."
 NEUTRAL_GROUP = "OK."
 BRIDGE_ALREADY_RUNNING_EXIT = 73
+POLLING_CONFLICT_LIMIT = 2
+POLLING_CONFLICT_WINDOW_SEC = 120.0
 
 
 class BridgeAlreadyRunning(RuntimeError):
@@ -118,6 +122,7 @@ class Bridge:
         self.client = client
         self.runs_root = Path(runs_root)
         self._offset: int | None = None
+        self._polling_conflicts: deque[float] = deque()
 
     def process_outbox_once(self) -> int:
         """Send pending notifications. Telegram failures leave outbox unsent."""
@@ -220,9 +225,18 @@ class Bridge:
                 timeout=self.config.poll_timeout_sec,
             )
         except TelegramPollingConflict:
-            # Continuing would let competing consumers alternately steal
-            # callbacks and resolve them against different state roots.
-            raise
+            # One conflict can be the previous long poll draining immediately
+            # after a service restart. Repeated conflicts indicate a real
+            # competing consumer that can steal callbacks for another state root.
+            now = time.monotonic()
+            cutoff = now - POLLING_CONFLICT_WINDOW_SEC
+            while self._polling_conflicts and self._polling_conflicts[0] < cutoff:
+                self._polling_conflicts.popleft()
+            self._polling_conflicts.append(now)
+            if len(self._polling_conflicts) >= POLLING_CONFLICT_LIMIT:
+                raise
+            logger.warning("transient getUpdates conflict after restart; retrying once")
+            return 0
         except TelegramError as exc:
             logger.warning("getUpdates failed: %s", exc)
             return 0

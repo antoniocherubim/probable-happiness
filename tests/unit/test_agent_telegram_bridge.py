@@ -244,7 +244,9 @@ def test_telegram_get_updates_409_is_a_fatal_polling_conflict() -> None:
         client.get_updates(timeout=1)
 
 
-def test_bridge_does_not_swallow_polling_conflict(tmp_path: Path) -> None:
+def test_bridge_tolerates_one_restart_conflict_then_fails_closed(
+    tmp_path: Path,
+) -> None:
     class ConflictTransport:
         def request(self, *_args: object, **_kwargs: object) -> FakeHttpResponse:
             return FakeHttpResponse(
@@ -259,6 +261,7 @@ def test_bridge_does_not_swallow_polling_conflict(tmp_path: Path) -> None:
         tmp_path,
     )
 
+    assert bridge.process_updates_once() == 0
     with pytest.raises(TelegramPollingConflict):
         bridge.process_updates_once()
 

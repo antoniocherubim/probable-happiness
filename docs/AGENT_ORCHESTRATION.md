@@ -130,8 +130,10 @@ rede nunca promove estado. Execute somente uma ponte por bot: ela varre os runs
 de todos os projetos e mantém uma trava local por token. Uma segunda instância,
 mesmo configurada com outro state root, encerra antes de disputar updates com a
 primeira. Um conflito HTTP 409 reportado pelo Telegram — inclusive contra um
-consumidor em outra máquina ou sessão — também encerra a ponte, pois continuar
-permitiria que callbacks fossem consumidos pelo state root errado.
+consumidor em outra máquina ou sessão — é tolerado uma vez durante restart para
+que o long poll anterior seja encerrado. Se reincidir em uma janela curta, a
+ponte encerra, pois continuar permitiria que callbacks fossem consumidos pelo
+state root errado.
 
 Ao abrir o gate, o Telegram recebe ID/título, repositório, base, iteração, hash,
 arquivos, estatísticas, executor, testes/validações, reviewer, findings, riscos
