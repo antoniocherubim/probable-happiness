@@ -26,6 +26,9 @@ venv/bin/pip install -r requirements.txt  # apenas testes locais
 ```
 
 As credenciais das CLIs e do Telegram ficam fora do Git.
+O runner recusa o Codex instalado via Snap, cujo confinamento não alcança os
+worktrees externos. A resolução prioriza `CODEX_BIN`, depois
+`~/.local/npm/bin/codex`, e ignora candidatos Snap encontrados no `PATH`.
 
 ## Comandos
 

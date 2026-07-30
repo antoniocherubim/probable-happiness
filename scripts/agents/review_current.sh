@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+AGENT_LOOP_REVIEW_SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+source "$AGENT_LOOP_REVIEW_SCRIPT_ROOT/scripts/agents/codex_bin.sh"
+
 die() {
   printf 'ERROR: %s\n' "$*" >&2
   exit 1
@@ -38,29 +41,6 @@ allocate_exclusive_run_dir() {
   printf '%s\n' "$candidate"
 }
 
-resolve_codex_bin() {
-  local candidate
-  if [[ -n "${CODEX_BIN:-}" && -x "${CODEX_BIN}" ]]; then
-    printf '%s\n' "$CODEX_BIN"
-    return 0
-  fi
-  candidate="$(command -v codex || true)"
-  if [[ -n "$candidate" && -x "$candidate" ]]; then
-    printf '%s\n' "$candidate"
-    return 0
-  fi
-  while IFS= read -r candidate; do
-    if [[ -x "$candidate" ]]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done < <(
-    find "$HOME/.vscode/extensions" "$HOME/.cursor/extensions" \
-      -path '*/openai.chatgpt-*/bin/*/codex' -type f 2>/dev/null | sort -Vr
-  )
-  return 1
-}
-
 IGNORE_ORCHESTRATION=0
 EVIDENCE_FILE=""
 while [[ "${1:-}" == --* ]]; do
@@ -88,7 +68,7 @@ if [[ -n "$EVIDENCE_FILE" ]]; then
     die "evidence must be a safe repository-relative path"
 fi
 
-TOOL_ROOT="${AGENT_LOOP_TOOL_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)}"
+TOOL_ROOT="${AGENT_LOOP_TOOL_ROOT:-$AGENT_LOOP_REVIEW_SCRIPT_ROOT}"
 if [[ -n "${AGENT_LOOP_TARGET_REPO:-}" ]]; then
   REPO_ROOT="$(git -C "$AGENT_LOOP_TARGET_REPO" rev-parse --show-toplevel 2>/dev/null)" || \
     die "target is not a Git repository: $AGENT_LOOP_TARGET_REPO"
@@ -104,6 +84,10 @@ fi
 
 CODEX_BIN="$(resolve_codex_bin || true)"
 [[ -n "$CODEX_BIN" && -x "$CODEX_BIN" ]] || die "Codex CLI not found"
+CODEX_VERSION_OUTPUT="$("$CODEX_BIN" --version 2>&1 || true)"
+CODEX_VERSION="$(printf '%s\n' "$CODEX_VERSION_OUTPUT" | tail -n 1)"
+printf '[agent-loop] Codex CLI selected: %s (%s)\n' \
+  "$CODEX_BIN" "${CODEX_VERSION:-version unavailable}"
 
 mkdir -p "$STATE_ROOT/runs"
 TASK_ID="$(basename "${TASK_FILE%.*}")"
@@ -141,7 +125,12 @@ set +e
   --output-schema "$SCHEMA_FILE" --output-last-message "$REVIEW_FILE" "$PROMPT"
 CODEX_EXIT=$?
 set -e
-[[ "$CODEX_EXIT" -eq 0 && -s "$REVIEW_FILE" ]] || die "review failed; run directory: $RUN_DIR"
+if [[ "$CODEX_EXIT" -ne 0 ]]; then
+  die "Codex review failed with exit $CODEX_EXIT; CLI=$CODEX_BIN; run directory: $RUN_DIR"
+fi
+if [[ ! -s "$REVIEW_FILE" ]]; then
+  die "Codex reviewer exited with code 0 but produced no report; CLI=$CODEX_BIN; run directory: $RUN_DIR"
+fi
 
 git diff --binary HEAD -- > "$AFTER_DIFF"
 set +e

@@ -16,6 +16,7 @@ AGENTS = REPO_ROOT / "scripts" / "agents"
 def test_agent_scripts_bash_syntax() -> None:
     scripts = [
         REPO_ROOT / "agent-loop",
+        AGENTS / "codex_bin.sh",
         AGENTS / "run_task.sh",
         AGENTS / "review_current.sh",
         AGENTS / "install-telegram-bridge-user-unit.sh",
@@ -28,6 +29,92 @@ def test_agent_scripts_bash_syntax() -> None:
             text=True,
         )
         assert completed.returncode == 0, f"{script.name}: {completed.stderr}"
+
+
+def _write_executable(path: Path, body: str = "#!/usr/bin/env bash\nexit 0\n") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+def _resolve_codex(
+    *,
+    home: Path,
+    path: str,
+    configured: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    environment = {
+        "HOME": str(home),
+        "PATH": path,
+    }
+    if configured is not None:
+        environment["CODEX_BIN"] = configured
+    return subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            f"source {str(AGENTS / 'codex_bin.sh')!r}; resolve_codex_bin",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+
+def test_codex_resolution_prefers_npm_over_snap_on_path(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    npm_codex = home / ".local" / "npm" / "bin" / "codex"
+    _write_executable(npm_codex)
+    snap_dir = tmp_path / "snap-bin"
+    snap_dir.mkdir()
+    (snap_dir / "codex").symlink_to("/usr/bin/snap")
+
+    completed = _resolve_codex(
+        home=home,
+        path=f"{snap_dir}:/usr/bin:/bin",
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == str(npm_codex)
+
+
+def test_codex_resolution_skips_snap_and_uses_next_path_candidate(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    snap_dir = tmp_path / "snap-bin"
+    snap_dir.mkdir()
+    (snap_dir / "codex").symlink_to("/usr/bin/snap")
+    good_codex = tmp_path / "npm-bin" / "codex"
+    _write_executable(good_codex)
+
+    completed = _resolve_codex(
+        home=home,
+        path=f"{snap_dir}:{good_codex.parent}:/usr/bin:/bin",
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == str(good_codex)
+
+
+def test_codex_resolution_rejects_explicit_snap(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    npm_codex = home / ".local" / "npm" / "bin" / "codex"
+    _write_executable(npm_codex)
+    snap_codex = tmp_path / "snap-bin" / "codex"
+    snap_codex.parent.mkdir()
+    snap_codex.symlink_to("/usr/bin/snap")
+
+    completed = _resolve_codex(
+        home=home,
+        path="/usr/bin:/bin",
+        configured=str(snap_codex),
+    )
+
+    assert completed.returncode == 1
+    assert "refusing Snap Codex" in completed.stderr
 
 
 def test_reviewer_prompts_do_not_expand_task_scope() -> None:

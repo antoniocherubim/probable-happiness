@@ -2,6 +2,7 @@
 set -euo pipefail
 
 AGENT_LOOP_SCRIPT_TOOL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+source "$AGENT_LOOP_SCRIPT_TOOL_ROOT/scripts/agents/codex_bin.sh"
 
 usage() {
   printf '%s\n' \
@@ -150,29 +151,6 @@ finalize_reviewed_run() {
   note "no commit or push was attempted; integrate the preserved worktree manually"
   note "worktree preserved: $WORKTREE"
   exit 0
-}
-
-resolve_codex_bin() {
-  local candidate
-  if [[ -n "${CODEX_BIN:-}" && -x "${CODEX_BIN}" ]]; then
-    printf '%s\n' "$CODEX_BIN"
-    return 0
-  fi
-  candidate="$(command -v codex || true)"
-  if [[ -n "$candidate" && -x "$candidate" ]]; then
-    printf '%s\n' "$candidate"
-    return 0
-  fi
-  while IFS= read -r candidate; do
-    if [[ -x "$candidate" ]]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done < <(
-    find "$HOME/.vscode/extensions" "$HOME/.cursor/extensions" \
-      -path '*/openai.chatgpt-*/bin/*/codex' -type f 2>/dev/null | sort -Vr
-  )
-  return 1
 }
 
 resolve_cursor_agent_bin() {
@@ -324,6 +302,15 @@ _run_task_entry() {
   else
     CODEX_AUTHENTICATED=0
   fi
+  set +e
+  CODEX_VERSION_OUTPUT="$("$CODEX_BIN" --version 2>&1)"
+  CODEX_VERSION_RC=$?
+  set -e
+  CODEX_VERSION="$(printf '%s\n' "$CODEX_VERSION_OUTPUT" | tail -n 1)"
+  if [[ "$CODEX_VERSION_RC" -ne 0 || -z "$CODEX_VERSION" ]]; then
+    CODEX_VERSION="version unavailable"
+  fi
+  note "Codex CLI selected: $CODEX_BIN ($CODEX_VERSION)"
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
     note "dry-run only; no worktree or agent will be started"
@@ -522,10 +509,16 @@ _run_task_entry() {
     if [[ "$CODEX_EXIT" -ne 0 || ! -s "$REVIEW_CANDIDATE" ]]; then
       if [[ "$CODEX_EXIT" -eq 124 ]]; then CODEX_REASON="reviewer_timeout"; \
       elif [[ "$CODEX_EXIT" -eq 125 ]]; then CODEX_REASON="reviewer_resource_limit"; \
-      elif [[ ! -s "$REVIEW_CANDIDATE" ]]; then CODEX_REASON="reviewer_empty_report"; \
-      else CODEX_REASON="reviewer_failed"; fi
+      elif [[ "$CODEX_EXIT" -ne 0 ]]; then CODEX_REASON="reviewer_failed"; \
+      else CODEX_REASON="reviewer_empty_report"; fi
+      if [[ "$CODEX_REASON" == "reviewer_empty_report" ]]; then
+        block_run \
+          "Codex reviewer exited with code $CODEX_EXIT but did not write the required report" \
+          reviewer "$(basename "$REVIEW_CANDIDATE")" "$CODEX_REASON"
+        die "Codex reviewer exited with code $CODEX_EXIT but produced no report; CLI=$CODEX_BIN; see $RUN_DIR/reviewer-${iteration}.log"
+      fi
       block_run "Codex review failed with exit $CODEX_EXIT" reviewer "$(basename "$REVIEW_CANDIDATE")" "$CODEX_REASON"
-      die "Codex review failed with exit $CODEX_EXIT; run directory: $RUN_DIR"
+      die "Codex review failed with exit $CODEX_EXIT; CLI=$CODEX_BIN; run directory: $RUN_DIR"
     fi
     mv "$REVIEW_CANDIDATE" "$REVIEW_FILE"
 
