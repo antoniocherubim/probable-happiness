@@ -137,6 +137,10 @@ arquivos, estatísticas, executor, testes/validações, reviewer, findings, risc
 e documentação — nunca o diff completo. Texto não usa `parse_mode`, URLs e
 atribuições sensíveis são redigidas e campos grandes são truncados
 explicitamente. Mensagens longas são numeradas e nenhuma contém botões.
+A contagem de testes vem somente do último `validation-N.log` concluído que
+contenha um resultado terminal. Marcadores `passed=N failed=N skipped=N` têm
+precedência; relatórios do executor, diffs, documentação, logs do reviewer,
+validações anteriores e diagnósticos de self-tests negativos não são somados.
 Cada `message_id` é persistido depois da resposta bem-sucedida do Telegram,
 reduzindo reenvios. A semântica permanece *at-least-once*: uma queda entre envio
 e persistência pode duplicar uma mensagem.

@@ -268,20 +268,85 @@ def _executor_summary(path: Path) -> tuple[str, list[str]]:
     return raw, risks
 
 
-_TEST_COUNT = re.compile(r"(?i)\b(\d+)\s+(passed|failed|skipped|errors?)\b")
+_TEST_COUNT = re.compile(r"(?i)\b(\d+)[ \t]+(passed|failed|skipped|errors?)\b")
+_STRUCTURED_TEST_COUNT = re.compile(
+    r"(?i)\b(passed|failed|skipped|errors?)=(\d+)\b"
+)
 
 
-def _test_summary(run_dir: Path, executor_report: Path) -> tuple[dict[str, int], list[str]]:
-    counts = {"passed": 0, "failed": 0, "skipped": 0, "errors": 0}
+def _empty_test_counts() -> dict[str, int]:
+    return {"passed": 0, "failed": 0, "skipped": 0, "errors": 0}
+
+
+def _counts_from_validation_log(text: str) -> dict[str, int] | None:
+    lines = text.splitlines()
+
+    # Explicit machine-readable markers are authoritative even when negative
+    # self-tests intentionally print error diagnostics later in the same log.
+    for line in reversed(lines):
+        matches = _STRUCTURED_TEST_COUNT.findall(line)
+        if not matches:
+            continue
+        counts = _empty_test_counts()
+        labels: set[str] = set()
+        for label, number in matches:
+            normalized = "errors" if label.lower().startswith("error") else label.lower()
+            labels.add(normalized)
+            counts[normalized] = int(number)
+        if "passed" in labels:
+            return counts
+
+    # Fall back to the last single-line test-run summary. Never scan across
+    # newlines or add summaries from separate commands/runs.
+    for line in reversed(lines):
+        matches = _TEST_COUNT.findall(line)
+        if not matches:
+            continue
+        counts = _empty_test_counts()
+        labels = set()
+        for number, label in matches:
+            normalized = "errors" if label.lower().startswith("error") else label.lower()
+            labels.add(normalized)
+            counts[normalized] = int(number)
+        if "passed" in labels:
+            return counts
+    return None
+
+
+def _validation_log_index(path: Path) -> int:
+    match = re.fullmatch(r"validation-(\d+)\.log", path.name)
+    return int(match.group(1)) if match else -1
+
+
+def _test_summary(
+    run_dir: Path,
+) -> tuple[dict[str, int], list[str], str | None]:
+    counts = _empty_test_counts()
+    count_source: str | None = None
     commands: list[str] = []
-    sources = [executor_report, *sorted(run_dir.glob("validation-*.log"))]
-    for source in sources:
-        if not source.is_file():
+
+    validation_logs = sorted(
+        run_dir.glob("validation-*.log"),
+        key=_validation_log_index,
+        reverse=True,
+    )
+    for source in validation_logs:
+        result_path = run_dir / source.name.replace(".log", "-result.json")
+        if not result_path.is_file():
+            continue
+        try:
+            result = read_json(result_path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        if result.get("state") != "completed" or result.get("exit_code") != 0:
             continue
         text = source.read_text(encoding="utf-8", errors="replace")
-        for number, label in _TEST_COUNT.findall(text):
-            normalized = "errors" if label.lower().startswith("error") else label.lower()
-            counts[normalized] += int(number)
+        parsed = _counts_from_validation_log(text)
+        if parsed is not None:
+            counts = parsed
+            count_source = source.name
+            break
+
     from .runstate import load_run_metadata
 
     metadata = load_run_metadata(run_dir)
@@ -290,7 +355,7 @@ def _test_summary(run_dir: Path, executor_report: Path) -> tuple[dict[str, int],
     configured = validation.get("commands") if isinstance(validation, dict) else []
     if isinstance(configured, list):
         commands = [" ".join(map(str, item))[:500] for item in configured if isinstance(item, list)]
-    return counts, commands
+    return counts, commands, count_source
 
 
 def prepare_review_artifacts(
@@ -323,7 +388,7 @@ def prepare_review_artifacts(
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise SnapshotError(f"invalid reviewer report: {exc}") from exc
     executor_summary, risks = _executor_summary(executor_report)
-    counts, commands = _test_summary(run_dir, executor_report)
+    counts, commands, count_source = _test_summary(run_dir)
     numstat = _git_bytes(worktree, "diff", "--numstat", "--no-renames", base_commit, "--")
     additions = deletions = 0
     for line in numstat.decode("utf-8", errors="replace").splitlines():
@@ -397,6 +462,7 @@ def prepare_review_artifacts(
         "deletions": deletions,
         "executor_summary": executor_summary,
         "test_counts": counts,
+        "test_count_source": count_source,
         "test_commands": commands,
         "validation_status": "passed"
         if all(item.get("state") == "completed" for item in validation_results)
@@ -432,6 +498,7 @@ def format_technical_summary(summary: dict[str, Any]) -> str:
             f"{counts.get('passed', 0)} passed, {counts.get('skipped', 0)} skipped, "
             f"{counts.get('failed', 0)} failed, {counts.get('errors', 0)} errors"
         ),
+        f"Fonte da contagem: {summary.get('test_count_source') or 'não disponível'}",
         f"Validação configurada: {summary.get('validation_status')}",
         f"Hash revisado: {str(summary.get('reviewed_diff_hash'))[:12]}…",
         "",

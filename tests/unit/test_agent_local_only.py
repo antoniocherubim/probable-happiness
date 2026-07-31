@@ -29,6 +29,7 @@ from dx.profile import ProfileError, load_project_profile  # noqa: E402
 from dx.runstate import plan_resume, write_run_metadata  # noqa: E402
 from dx.snapshot import (  # noqa: E402
     SnapshotError,
+    _test_summary,
     build_snapshot_manifest,
     format_technical_summary,
     split_telegram_message,
@@ -262,6 +263,60 @@ def test_summary_is_sanitized_and_chunked() -> None:
     assert "token=[REDACTED]" in rendered
     assert "password=[REDACTED]" in rendered
     assert "https://user:pw@" not in rendered
+
+
+def test_test_summary_uses_only_latest_authoritative_validation(
+    tmp_path: Path,
+) -> None:
+    env = make_local_run(tmp_path)
+    run_dir = env["run_dir"]
+    (run_dir / "cursor-3.json").write_text(
+        "documentation says 999 passed, 600 errors\n",
+        encoding="utf-8",
+    )
+    logs = {
+        1: "",
+        2: "1 passed in 0.45s\n348 passed, 379 deselected in 19.29s\n",
+        3: (
+            "31 passed, 1 warning in 56.29s\n"
+            "qa03b_security_matrix_ok passed=31 failed=0 skipped=0\n"
+            "SELF-TEST OK: expected negative cases follow\n"
+            "600 errors expected by fixture documentation\n"
+        ),
+        4: "",
+    }
+    for index, text in logs.items():
+        (run_dir / f"validation-{index}.log").write_text(text, encoding="utf-8")
+        (run_dir / f"validation-{index}-result.json").write_text(
+            json.dumps({"state": "completed", "exit_code": 0}),
+            encoding="utf-8",
+        )
+
+    counts, commands, source = _test_summary(run_dir)
+
+    assert counts == {"passed": 31, "failed": 0, "skipped": 0, "errors": 0}
+    assert source == "validation-3.log"
+    assert commands == ["python3 -m pytest -q"]
+
+
+def test_test_summary_falls_back_to_last_single_line_summary(
+    tmp_path: Path,
+) -> None:
+    env = make_local_run(tmp_path)
+    run_dir = env["run_dir"]
+    (run_dir / "validation-1.log").write_text(
+        "1 passed in 0.10s\n47 passed, 1 skipped in 2.0s\n",
+        encoding="utf-8",
+    )
+    (run_dir / "validation-1-result.json").write_text(
+        json.dumps({"state": "completed", "exit_code": 0}),
+        encoding="utf-8",
+    )
+
+    counts, _commands, source = _test_summary(run_dir)
+
+    assert counts == {"passed": 47, "failed": 0, "skipped": 1, "errors": 0}
+    assert source == "validation-1.log"
 
 
 def test_multipart_terminal_notification_has_no_actions(tmp_path: Path) -> None:
