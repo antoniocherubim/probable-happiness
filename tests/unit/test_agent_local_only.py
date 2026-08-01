@@ -30,8 +30,10 @@ from dx.runstate import plan_resume, write_run_metadata  # noqa: E402
 from dx.snapshot import (  # noqa: E402
     SnapshotError,
     _test_summary,
+    build_suggested_commit_message,
     build_snapshot_manifest,
     format_technical_summary,
+    format_commit_suggestion,
     split_telegram_message,
     validate_documentation,
 )
@@ -263,6 +265,20 @@ def test_summary_is_sanitized_and_chunked() -> None:
     assert "token=[REDACTED]" in rendered
     assert "password=[REDACTED]" in rendered
     assert "https://user:pw@" not in rendered
+
+
+def test_commit_suggestion_is_deterministic_single_line_and_bounded() -> None:
+    subject = build_suggested_commit_message(
+        "QA-03B",
+        "CI de identidade,\nauth e RLS production-like " + "x" * 300,
+    )
+
+    assert subject.startswith("QA-03B: implementa CI de identidade, auth")
+    assert "\n" not in subject
+    assert len(subject) <= 240
+    assert format_commit_suggestion(subject) == (
+        "Mensagem de commit sugerida:\n\n" + subject
+    )
 
 
 def test_test_summary_uses_only_latest_authoritative_validation(

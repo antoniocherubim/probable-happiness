@@ -19,6 +19,7 @@ from .profile import ProjectProfile, sanitize_text
 MANIFEST_FILENAME = "reviewed_manifest.json"
 SUMMARY_FILENAME = "technical_summary.json"
 TELEGRAM_CHUNK_LIMIT = 3500
+COMMIT_SUBJECT_LIMIT = 240
 
 
 class SnapshotError(ValueError):
@@ -240,6 +241,22 @@ def _task_title(worktree: Path, task_file: str, task_id: str) -> str:
     return task_id
 
 
+def build_suggested_commit_message(task_id: str, task_title: str) -> str:
+    """Build one safe, deterministic Git subject without inferring a change type."""
+    safe_id = " ".join(sanitize_text(str(task_id)).split()) or "TASK"
+    safe_title = " ".join(sanitize_text(str(task_title)).split())
+    if not safe_title or safe_title.casefold() == safe_id.casefold():
+        safe_title = "alterações revisadas"
+    return f"{safe_id}: implementa {safe_title}"[:COMMIT_SUBJECT_LIMIT].rstrip()
+
+
+def format_commit_suggestion(subject: str) -> str:
+    safe_subject = " ".join(sanitize_text(str(subject)).split())
+    if not safe_subject:
+        safe_subject = "TASK: implementa alterações revisadas"
+    return f"Mensagem de commit sugerida:\n\n{safe_subject[:COMMIT_SUBJECT_LIMIT].rstrip()}"
+
+
 def _read_sanitized(path: Path, limit: int = 1600) -> str:
     if not path.is_file():
         return "não informado"
@@ -447,10 +464,14 @@ def prepare_review_artifacts(
         for path in sorted(run_dir.glob("validation-*-result.json"))
         if path.is_file()
     ]
+    task_title = _task_title(worktree, task_file, task_id)
     summary = {
         "schema_version": 1,
         "task_id": task_id,
-        "task_title": _task_title(worktree, task_file, task_id),
+        "task_title": task_title,
+        "suggested_commit_message": build_suggested_commit_message(
+            task_id, task_title
+        ),
         "repository": repo.name,
         "base_commit": base_commit,
         "iteration": iteration,

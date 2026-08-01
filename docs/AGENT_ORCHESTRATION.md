@@ -169,6 +169,15 @@ Documentação:
 Run finalizada. A integração permanece manual.
 ```
 
+Depois de todos os chunks do resumo, o notifier envia uma mensagem separada,
+determinística e editável. Ela não executa Git nem altera a integração:
+
+```text
+Mensagem de commit sugerida:
+
+TASK-01: implementa Descrição curta da mudança
+```
+
 ## systemd --user
 
 ```bash

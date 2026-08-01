@@ -615,6 +615,11 @@ def test_resumed_review_finishes_and_queues_terminal_notification(tmp_path: Path
     )
     assert bridge.process_outbox_once() == 1
     assert all("reply_markup" not in item for item in fake.sent_messages)
+    assert len(fake.sent_messages) >= 2
+    assert fake.sent_messages[-1]["text"] == (
+        "Mensagem de commit sugerida:\n\n"
+        "DX-02: implementa alterações revisadas"
+    )
     assert read_status(run_dir) == STATUS_APPROVED
     assert verify_reviewed_snapshot(run_dir)["matches"] is True
 

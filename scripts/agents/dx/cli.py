@@ -56,7 +56,9 @@ from .runtime import phase_settings, supervise_command, tracked_worktree_clean
 from .snapshot import (
     SUMMARY_FILENAME,
     SnapshotError,
+    build_suggested_commit_message,
     build_snapshot_manifest,
+    format_commit_suggestion,
     prepare_review_artifacts,
     reject_nonignored_special_files,
     validate_documentation,
@@ -151,6 +153,7 @@ def cmd_compute_diff_hash(args: argparse.Namespace) -> int:
 def cmd_notify_approved(args: argparse.Namespace) -> int:
     summary = build_approved_summary(args.task_id, args.review_report)
     messages = None
+    commit_subject = build_suggested_commit_message(args.task_id, "")
     summary_path = Path(args.run_dir) / SUMMARY_FILENAME
     if summary_path.is_file():
         try:
@@ -164,8 +167,19 @@ def cmd_notify_approved(args: argparse.Namespace) -> int:
                     "\n\nRun finalizada. A integração permanece manual."
                 )
                 summary = configured[0]
+            stored_subject = technical.get("suggested_commit_message")
+            if isinstance(stored_subject, str) and stored_subject.strip():
+                commit_subject = stored_subject
+            else:
+                commit_subject = build_suggested_commit_message(
+                    str(technical.get("task_id") or args.task_id),
+                    str(technical.get("task_title") or ""),
+                )
         except (OSError, UnicodeError, json.JSONDecodeError):
             messages = None
+    if messages is None:
+        messages = [summary]
+    messages.append(format_commit_suggestion(commit_subject))
     enqueue_notification(
         run_dir=Path(args.run_dir),
         kind="approved",
