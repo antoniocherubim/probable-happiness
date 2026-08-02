@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import stat
@@ -411,7 +412,7 @@ def build_authorized_environment(
     return child, diagnostics
 
 
-_URL = re.compile(r"(?i)\b(?:postgres(?:ql)?|https?|redis|mysql)://[^\s'\"]+")
+_URL = re.compile(r"(?i)\b(?:postgres(?:ql)?|https?|redis|mysql)://[^\s'\"\\]+")
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(token|password|passwd|secret|api[_-]?key)\s*[:=]\s*([^\s,;]+)"
 )
@@ -424,6 +425,30 @@ def sanitize_text(text: str, secrets: Mapping[str, str] | None = None) -> str:
             result = result.replace(value, "[REDACTED]")
     result = _SECRET_ASSIGNMENT.sub(lambda match: f"{match.group(1)}=[REDACTED]", result)
     return _URL.sub("[REDACTED_URL]", result)
+
+
+def _sanitize_json_value(value: Any, secrets: Mapping[str, str] | None) -> Any:
+    if isinstance(value, str):
+        return sanitize_text(value, secrets)
+    if isinstance(value, list):
+        return [_sanitize_json_value(item, secrets) for item in value]
+    if isinstance(value, dict):
+        return {key: _sanitize_json_value(item, secrets) for key, item in value.items()}
+    return value
+
+
+def sanitize_artifact_text(text: str, secrets: Mapping[str, str] | None = None) -> str:
+    """Sanitize valid JSON structurally and use text replacement only otherwise."""
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return sanitize_text(text, secrets)
+    sanitized = json.dumps(
+        _sanitize_json_value(value, secrets),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return sanitized + ("\n" if text.endswith(("\n", "\r")) else "")
 
 
 def load_instruction_text(profile: ProjectProfile, repo: Path, phase: str) -> str:

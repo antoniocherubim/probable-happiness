@@ -95,7 +95,9 @@ automaticamente. Deve ser regular, não symlink, do usuário atual e `0600` (ou
 mais restritivo). Chaves extras são ignoradas; somente nomes em
 `environment.required` chegam ao bootstrap, Cursor e validações. Logs mostram
 apenas `NOME=set|unset`, substituem valores por `[REDACTED]` e URLs por
-`[REDACTED_URL]` nos artefatos finais. Durante a execução, stdout e stderr passam
+`[REDACTED_URL]` nos artefatos finais. Artefatos JSON válidos são desserializados,
+sanitizados recursivamente apenas em seus valores textuais e serializados de novo,
+preservando escapes e a validade estrutural. Durante a execução, stdout e stderr passam
 por arquivos temporários brutos antes da sanitização; uma morte abrupta do
 supervisor pode deixá-los no run directory. Proteja o state root contra outros
 usuários locais e inspecione/remova esses arquivos após uma interrupção anormal.

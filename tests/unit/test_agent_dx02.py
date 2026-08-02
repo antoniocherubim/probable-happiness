@@ -34,6 +34,7 @@ from dx.profile import (  # noqa: E402
     ProjectProfile,
     build_authorized_environment,
     load_project_profile,
+    sanitize_artifact_text,
     sanitize_text,
 )
 from dx.runstate import (  # noqa: E402
@@ -195,6 +196,39 @@ def test_environment_file_is_allowlisted_and_values_are_sanitized(tmp_path: Path
     env_file.chmod(0o644)
     with pytest.raises(ProfileError, match="0600"):
         build_authorized_environment(profile, env_file)
+
+
+def test_json_artifact_sanitization_preserves_escaped_quotes() -> None:
+    report = {
+        "status": "CHANGES_REQUESTED",
+        "summary": 'RedisError("connection failed: redis://user:password@cache.test:6379/0")',
+        "findings": [
+            {
+                "severity": "high",
+                "title": "Credencial exposta",
+                "details": 'Falhou com "https://user:token@example.test/api?q=secret".',
+                "files": ["src/cache.py"],
+            }
+        ],
+        "tests_required": [],
+    }
+    raw = json.dumps(report, ensure_ascii=False)
+
+    serialized = sanitize_artifact_text(raw)
+    sanitized = json.loads(serialized)
+
+    assert sanitized["summary"] == 'RedisError("connection failed: [REDACTED_URL]")'
+    assert sanitized["findings"][0]["details"] == 'Falhou com "[REDACTED_URL]".'
+    assert "password" not in serialized
+    assert "token" not in serialized
+
+
+def test_non_json_artifact_sanitization_does_not_consume_escape_prefix() -> None:
+    raw = r'RedisError(\"connection failed: redis://user:password@cache.test:6379/0\")'
+
+    sanitized = sanitize_artifact_text(raw)
+
+    assert sanitized == r'RedisError(\"connection failed: [REDACTED_URL]\")'
 
 
 def test_executor_and_validation_receive_only_allowlisted_project_environment(tmp_path: Path) -> None:

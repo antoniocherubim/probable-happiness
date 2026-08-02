@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import IO, Mapping, Sequence
 
 from .atomic import atomic_write_bytes, atomic_write_json, atomic_write_text
-from .profile import ProjectProfile, sanitize_text
+from .profile import ProjectProfile, sanitize_artifact_text, sanitize_text
 from .systemd_scope import (
     scope_unit_basename,
     start_scoped_popen,
@@ -345,7 +345,7 @@ def supervise_command(
                 text = artifact.read_text(encoding="utf-8", errors="replace")
                 atomic_write_bytes(
                     artifact,
-                    sanitize_text(text, secret_values).encode("utf-8"),
+                    sanitize_artifact_text(text, secret_values).encode("utf-8"),
                 )
     raw_stdout.unlink(missing_ok=True)
     raw_stderr.unlink(missing_ok=True)
