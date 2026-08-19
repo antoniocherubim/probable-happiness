@@ -28,6 +28,18 @@ from .bridge import (
 )
 from .config import ConfigError, load_bridge_config
 from .atomic import atomic_write_json
+from .control_adapter import (
+    ControlAdapterError,
+    UnauthorizedProfileChange,
+    accept_candidate_profile,
+    build_authorization,
+    capture_control_adapter,
+    control_adapter_metadata,
+    load_control_profile,
+    load_frozen_instruction_text,
+    materialize_control_adapter,
+    rewrite_frozen_entrypoint,
+)
 from .integration import IntegrationError, integrate_reviewed_snapshot
 from .paths import (
     PathConfigError,
@@ -41,6 +53,7 @@ from .profile import (
     build_authorized_environment,
     load_instruction_text,
     load_project_profile,
+    load_project_profile_from_git,
 )
 from .runstate import (
     IterationBudgetError,
@@ -228,7 +241,20 @@ def cmd_integrate_reviewed_snapshot(args: argparse.Namespace) -> int:
 
 
 def _profile_for(args: argparse.Namespace) -> ProjectProfile:
-    return load_project_profile(Path(args.repo), missing_policy=getattr(args, "missing_policy", "allow"))
+    missing_policy = getattr(args, "missing_policy", "allow")
+    run_dir = getattr(args, "run_dir", None)
+    if run_dir:
+        worktree = getattr(args, "worktree", None) or getattr(args, "repo", None) or run_dir
+        return load_control_profile(Path(run_dir), Path(worktree))
+    repo = getattr(args, "repo", None)
+    if not repo:
+        raise ProfileError("profile requires --repo or --run-dir")
+    base_commit = getattr(args, "base_commit", None)
+    if base_commit:
+        return load_project_profile_from_git(
+            repo, base_commit, missing_policy=missing_policy
+        )
+    return load_project_profile(repo, missing_policy=missing_policy)
 
 
 def cmd_profile(args: argparse.Namespace) -> int:
@@ -253,10 +279,24 @@ def cmd_approval_mode(args: argparse.Namespace) -> int:
 
 def cmd_instructions(args: argparse.Namespace) -> int:
     try:
+        if args.run_dir:
+            print(load_frozen_instruction_text(Path(args.run_dir), args.phase), end="")
+            return 0
+        if not args.repo:
+            print("ERROR: instructions requires --repo or --run-dir", file=sys.stderr)
+            return 2
         repo = Path(args.repo).resolve()
+        if args.base_commit:
+            capture = capture_control_adapter(repo, args.base_commit)
+            text = "\n\n".join(
+                f"Additional tracked project instructions from {item['path']}:\n{item['text']}"
+                for item in capture["instructions"][args.phase]
+            )
+            print(text, end="")
+            return 0
         profile = load_project_profile(repo)
         print(load_instruction_text(profile, repo, args.phase), end="")
-    except (OSError, UnicodeError, ProfileError) as exc:
+    except (OSError, UnicodeError, ProfileError, ControlAdapterError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     return 0
@@ -281,9 +321,17 @@ def _run_profile_command(
     iteration: int,
     report: Path | None = None,
     artifacts: list[Path] | None = None,
+    rewrite_entrypoints: bool = False,
 ) -> int:
     try:
-        profile = load_project_profile(Path(args.worktree))
+        profile = load_control_profile(Path(args.run_dir), Path(args.worktree))
+        if rewrite_entrypoints:
+            command = rewrite_frozen_entrypoint(
+                command,
+                Path(args.run_dir),
+                repo=getattr(args, "repo", None),
+                base_commit=getattr(args, "base_commit", None),
+            )
         environment_profile = profile
         if phase == "reviewer":
             environment_profile = dataclasses.replace(profile, required_environment=())
@@ -324,15 +372,15 @@ def _run_profile_command(
             report_path=report,
             sanitize_artifacts=artifacts or (),
         )
-    except (OSError, ProfileError, SystemdScopeError, ValueError) as exc:
+    except (OSError, ProfileError, ControlAdapterError, SystemdScopeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
 
 def cmd_run_bootstrap(args: argparse.Namespace) -> int:
     try:
-        profile = load_project_profile(Path(args.worktree))
-    except ProfileError as exc:
+        profile = load_control_profile(Path(args.run_dir), Path(args.worktree))
+    except (ProfileError, ControlAdapterError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     if profile.bootstrap_command is None:
@@ -343,6 +391,7 @@ def cmd_run_bootstrap(args: argparse.Namespace) -> int:
         profile.bootstrap_command,
         phase="bootstrap",
         iteration=0,
+        rewrite_entrypoints=True,
     )
     if result == 0 and not tracked_worktree_clean(Path(args.worktree), args.base_commit):
         print("ERROR: bootstrap modified tracked repository files", file=sys.stderr)
@@ -358,8 +407,8 @@ def cmd_run_bootstrap(args: argparse.Namespace) -> int:
 
 def cmd_run_validations(args: argparse.Namespace) -> int:
     try:
-        profile = load_project_profile(Path(args.worktree))
-    except ProfileError as exc:
+        profile = load_control_profile(Path(args.run_dir), Path(args.worktree))
+    except (ProfileError, ControlAdapterError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     for index, command in enumerate(profile.validation_commands, 1):
@@ -368,6 +417,7 @@ def cmd_run_validations(args: argparse.Namespace) -> int:
             command,
             phase="validation",
             iteration=index,
+            rewrite_entrypoints=True,
         )
         if result != 0:
             return result
@@ -393,7 +443,19 @@ def cmd_supervise(args: argparse.Namespace) -> int:
 
 def cmd_init_run(args: argparse.Namespace) -> int:
     try:
-        profile = load_project_profile(Path(args.worktree))
+        capture = capture_control_adapter(
+            Path(args.repo),
+            args.base_commit,
+            missing_policy=args.missing_policy,
+        )
+        authorization = build_authorization(
+            allowed=bool(args.allow_candidate_profile),
+            base_commit=args.base_commit,
+        )
+        manifest = materialize_control_adapter(
+            Path(args.run_dir), capture, authorization
+        )
+        profile = capture["profile"]
         payload = write_run_metadata(
             Path(args.run_dir),
             {
@@ -404,9 +466,11 @@ def cmd_init_run(args: argparse.Namespace) -> int:
                 "max_iterations": args.max_iterations,
                 "env_file": str(Path(args.env_file).expanduser().resolve()) if args.env_file else None,
                 "profile": profile.public_dict(),
+                "candidate_profile_authorization": authorization,
+                "control_adapter": control_adapter_metadata(capture, manifest),
             },
         )
-    except (OSError, ProfileError, RunStateError) as exc:
+    except (OSError, ProfileError, ControlAdapterError, RunStateError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     print(payload["run_id"])
@@ -528,9 +592,27 @@ def cmd_record_review_snapshot(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_accept_candidate_profile(args: argparse.Namespace) -> int:
+    """Allow a valid authorized candidate profile; refuse unauthorized mutation."""
+    try:
+        result = accept_candidate_profile(
+            Path(args.run_dir),
+            Path(args.worktree),
+            args.base_commit,
+        )
+    except UnauthorizedProfileChange as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    except (OSError, ProfileError, ControlAdapterError, RunStateError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps({"candidate_profile": result["differs_from_frozen"]}, sort_keys=True))
+    return 0
+
+
 def cmd_validate_documentation(args: argparse.Namespace) -> int:
     try:
-        profile = load_project_profile(Path(args.worktree))
+        profile = load_control_profile(Path(args.run_dir), Path(args.worktree))
         manifest = build_snapshot_manifest(Path(args.worktree), args.base_commit)
         changed = validate_documentation(
             profile,
@@ -538,7 +620,7 @@ def cmd_validate_documentation(args: argparse.Namespace) -> int:
             task_id=args.task_id,
             task_slug=args.task_slug,
         )
-    except (OSError, ProfileError, SnapshotError) as exc:
+    except (OSError, ProfileError, ControlAdapterError, SnapshotError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     print(json.dumps({"documentation": changed}, sort_keys=True))
@@ -547,7 +629,7 @@ def cmd_validate_documentation(args: argparse.Namespace) -> int:
 
 def cmd_prepare_review_artifacts(args: argparse.Namespace) -> int:
     try:
-        profile = load_project_profile(Path(args.worktree))
+        profile = load_control_profile(Path(args.run_dir), Path(args.worktree))
         summary, _messages = prepare_review_artifacts(
             run_dir=Path(args.run_dir),
             repo=Path(args.repo),
@@ -563,7 +645,18 @@ def cmd_prepare_review_artifacts(args: argparse.Namespace) -> int:
             reviewed_hash=args.reviewed_hash,
             profile=profile,
         )
-    except (OSError, ProfileError, SnapshotError, ValueError, json.JSONDecodeError) as exc:
+        accept_candidate_profile(
+            Path(args.run_dir), Path(args.worktree), args.base_commit
+        )
+    except (
+        OSError,
+        ProfileError,
+        ControlAdapterError,
+        UnauthorizedProfileChange,
+        SnapshotError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     print(json.dumps({"file_count": summary["file_count"]}, sort_keys=True))
@@ -749,17 +842,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("profile", help="Parse and print the sanitized project profile")
-    p.add_argument("--repo", required=True)
+    p.add_argument("--repo", default=None)
+    p.add_argument("--run-dir", default=None)
+    p.add_argument("--worktree", default=None)
+    p.add_argument("--base-commit", default=None)
     p.add_argument("--missing-policy", choices=("allow", "deny"), default="allow")
     p.set_defaults(func=cmd_profile)
 
     p = sub.add_parser("approval-mode", help="Print the configured notification mode")
-    p.add_argument("--repo", required=True)
+    p.add_argument("--repo", default=None)
+    p.add_argument("--run-dir", default=None)
+    p.add_argument("--worktree", default=None)
+    p.add_argument("--base-commit", default=None)
     p.add_argument("--missing-policy", choices=("allow", "deny"), default="allow")
     p.set_defaults(func=cmd_approval_mode)
 
     p = sub.add_parser("instructions", help="Read validated tracked phase instructions")
-    p.add_argument("--repo", required=True)
+    p.add_argument("--repo", default=None)
+    p.add_argument("--run-dir", default=None)
+    p.add_argument("--base-commit", default=None)
     p.add_argument("--phase", choices=("executor", "reviewer"), required=True)
     p.set_defaults(func=cmd_instructions)
 
@@ -796,6 +897,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--base-commit", required=True)
     p.add_argument("--max-iterations", type=int, required=True)
     p.add_argument("--env-file", default=None)
+    p.add_argument("--missing-policy", choices=("allow", "deny"), default="allow")
+    p.add_argument(
+        "--allow-candidate-profile",
+        action="store_true",
+        help="Authorize reviewing a candidate .agent-loop/project.toml without activating it",
+    )
     p.set_defaults(func=cmd_init_run)
 
     p = sub.add_parser("validate-run", help="Validate resume bindings")
@@ -822,9 +929,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_record_review_snapshot)
 
     p = sub.add_parser(
+        "accept-candidate-profile",
+        help="Validate an authorized candidate profile without activating it",
+    )
+    p.add_argument("--run-dir", required=True)
+    p.add_argument("--worktree", required=True)
+    p.add_argument("--base-commit", required=True)
+    p.set_defaults(func=cmd_accept_candidate_profile)
+
+    p = sub.add_parser(
         "validate-documentation",
         help="Require configured documentation paths in the current snapshot",
     )
+    p.add_argument("--run-dir", required=True)
     p.add_argument("--worktree", required=True)
     p.add_argument("--base-commit", required=True)
     p.add_argument("--task-id", required=True)

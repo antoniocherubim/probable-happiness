@@ -1,6 +1,6 @@
 ---
 id: SELF-00P
-status: planned
+status: completed
 depends_on: []
 ---
 
@@ -71,11 +71,37 @@ destinada somente a runs futuros.
 6. Perfis e comandos atuais de consumidores externos continuam aceitos sem a
    nova flag e com a mesma interface pública.
 
-## Gate focado
+## Comportamento entregue
 
-Esta task não pode depender da política que está criando. No primeiro run, a
-suíte deve ser executada com o Python/pytest já instalado no repositório
-canônico:
+- Flag explícita: `--allow-candidate-profile` em `agent-loop run`, persistida em
+  `state.json.metadata.candidate_profile_authorization` e no manifesto de
+  `control-adapter/`.
+- Captura imutável no `init-run` a partir dos blobs Git do commit-base: profile,
+  instruções rastreadas/convencionais já existentes e o script de entrypoint de
+  bootstrap/gates. Um entrypoint configurado ausente no commit-base falha fechado
+  (`configured adapter entrypoint is missing from the base commit`); o candidato
+  não pode criar esse arquivo depois e tê-lo executado na validação corrente.
+- O resolver reconhece o script após flags de interpretador (`bash -e`,
+  `bash -euo pipefail`, `/bin/bash -e`, `python3 -B`, …). `python3 -m` não é um
+  entrypoint de arquivo; `rewrite_frozen_entrypoint()` insere `-P` para o módulo
+  nomeado não ser carregado do cwd do worktree candidato. `bash -c` continua a
+  não ser tratado como entrypoint de arquivo.
+- Bootstrap, validações, documentação obrigatória e `instructions --run-dir`
+  leem somente o adapter congelado. O worktree candidato permanece o objeto de
+  teste. `rewrite_frozen_entrypoint()` substitui o operand do script por uma
+  cópia cujo digest confere com o manifesto ou, na ausência de adapter
+  materializado, pelo blob Git do commit-base; nunca pelo caminho relativo do
+  worktree. Para `python -m`, o argv ganha `-P` quando ainda não há `-P`/`-I`,
+  para o módulo do gate não vir do candidato; argumentos de caminho continuam
+  relativos ao worktree. Cópia congelada ausente ou adulterada falha fechado.
+- Sem a flag, a mensagem estável
+  `executor modified .agent-loop/project.toml; resume settings must remain immutable`
+  continua valendo.
+- `resume` reusa a visão congelada. `verify`/`integrate` só transportam
+  `.agent-loop/project.toml` quando autorização, manifesto e `candidate-profile.json`
+  coincidem com o snapshot revisado.
+
+## Gate executado
 
 ```bash
 "$AGENT_LOOP_TARGET_REPO/venv/bin/python" -m pytest -q
@@ -84,11 +110,31 @@ bash -n agent-loop scripts/agents/*.sh
 git diff --check
 ```
 
-## Entrega obrigatória
+## Evidência de testes
 
-Entregar a separação entre controle congelado e adapter candidato, testes
-positivos/negativos e documentação operacional. Atualizar esta task e o roadmap
-com resultados reais; não registrar evidência antes da execução.
+Executado neste worktree em 2026-08-19, com o Python do repositório canônico:
+
+| Comando | Resultado |
+|---|---|
+| `venv/bin/python -m pytest -q` | **240 passed**, 0 failed, 0 skipped, 0 errors em 67.26s |
+| `python3 -m compileall -q scripts/agents` | exit 0 |
+| `bash -n agent-loop scripts/agents/*.sh` | exit 0 |
+| `git diff --check` | exit 0 |
+
+Os 16 testes em `tests/unit/test_agent_self00p.py` cobrem recusa sem flag,
+autorização explícita, gate congelado após substituição candidata, injeção de
+`reviewer.md`, profile inválido, autorização adulterada, divergência
+metadata/snapshot, interface pública sem a flag, um run autorizado que chega a
+`verify`/`resume`/`integrate`, e os negativos de revisão: candidato cria um gate
+configurado ausente no base (`bash -e scripts/gate.sh`) e a inicialização/rewrite
+falham fechados; candidato substitui um gate invocado com opções de
+interpretador e só o snapshot congelado do base é executado; candidato planta
+`compileall.py` no worktree para sombrear o `python3 -m compileall` congelado e
+o módulo candidato não é executado (`-P` isola a resolução; o compileall da
+stdlib ainda processa o objeto de teste).
+
+Não há SHA de commit nem URL de branch neste registro: a integração permanece
+manual e ainda não ocorreu.
 
 ## Riscos / observações
 
@@ -96,3 +142,19 @@ com resultados reais; não registrar evidência antes da execução.
   ela, `SELF-00A` não é executável pelo loop atual.
 - O gate programático congelado deste primeiro run ainda é o profile atual;
   por isso a suíte completa acima é critério explícito do reviewer.
+- A captura de entrypoints cobre o script nomeado no argv após flags do
+  interpretador, não helpers `source`d internamente nem arquivos carregados por
+  `--rcfile`/`--init-file`.
+- O rewrite insere `-P` em `python3 -m` (ou preserva `-P`/`-I` já presentes),
+  então o módulo do gate é resolvido sem o cwd do candidato. `PYTHONPATH`
+  autorizado que aponte para o worktree ainda pode sombrear o módulo;
+  `python3 -c` e `bash -c` continuam inline e podem importar/ler o cwd.
+- Runs criados antes desta mudança não têm `control-adapter/` materializado;
+  o resume lê instruções do commit-base via Git. Validação de um script relativo
+  nesses runs usa o blob Git do commit-base, não o worktree candidato. `python -m`
+  nesses runs ainda recebe `-P` no rewrite, sem depender da cópia materializada.
+- Hashes e o manifesto detectam drift e adulteração parcial; reescrita
+  coordenada de metadata e manifesto pelo mesmo UID permanece fora do modelo
+  autenticado.
+- O parser do profile candidato não foi relaxado; schema desconhecido continua
+  recusado.

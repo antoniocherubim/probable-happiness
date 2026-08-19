@@ -20,7 +20,8 @@ from .approval import (
     verify_reviewed_snapshot,
 )
 from .atomic import atomic_write_json, read_json, run_scoped_lock
-from .profile import ProfileError, load_project_profile
+from .control_adapter import ControlAdapterError, evaluate_live_profile
+from .profile import ProfileError
 from .state_machine import (
     StateTransitionError,
     initialize_run_state,
@@ -121,14 +122,11 @@ def validate_run(run_dir: Path) -> dict[str, Any]:
     if not isinstance(recorded_profile, dict):
         raise RunStateError("frozen project profile missing from run metadata")
     try:
-        live_profile = load_project_profile(worktree).public_dict()
+        evaluate_live_profile(run_dir, worktree, metadata)
+    except ControlAdapterError as exc:
+        raise RunStateError(str(exc)) from exc
     except ProfileError as exc:
         raise RunStateError(f"current project profile is invalid: {exc}") from exc
-    frozen = dict(recorded_profile)
-    frozen["profile_path"] = None
-    live_profile["profile_path"] = None
-    if live_profile != frozen:
-        raise RunStateError("project profile changed after run creation")
     return {**metadata, "run_dir": str(run_dir), "status": read_status(run_dir)}
 
 

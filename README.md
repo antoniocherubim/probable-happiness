@@ -50,6 +50,8 @@ O projeto-alvo não recebe scripts nem estado do runner:
 
 ```bash
 ./agent-loop run --repo /caminho/do/projeto docs/tasks/TASK-01.md 3 main
+./agent-loop run --repo /caminho/do/projeto --allow-candidate-profile \
+  docs/tasks/SELF-00A.md 3 main
 ./agent-loop review --repo /caminho/do/projeto docs/tasks/TASK-01.md
 ./agent-loop resume --run-dir /caminho/externo/para/o/run
 ./agent-loop resume --run-dir /caminho/externo/para/o/run --additional-iterations 3

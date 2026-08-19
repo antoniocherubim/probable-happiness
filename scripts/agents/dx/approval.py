@@ -18,6 +18,7 @@ from .atomic import (
     read_json,
     run_scoped_lock,
 )
+from .control_adapter import ControlAdapterError, assert_candidate_transport
 from .state_machine import (
     RunEvent,
     RunState,
@@ -658,12 +659,20 @@ def verify_reviewed_snapshot(run_dir: Path) -> dict[str, Any]:
             raise ApprovalError("reviewed manifest does not match run metadata")
         worktree = Path(worktree_value)
         current = compute_diff_hash(worktree, base_commit)
+        matches = current == expected
+        if matches:
+            if not isinstance(metadata, dict):
+                raise ApprovalError("reviewed manifest does not match run metadata")
+            try:
+                assert_candidate_transport(run_dir, metadata, manifest, worktree)
+            except ControlAdapterError as exc:
+                raise ApprovalError(str(exc)) from exc
         return {
             "schema_version": SCHEMA_VERSION,
             "run_id": run_dir.name,
             "reviewed_diff_hash": expected,
             "current_diff_hash": current,
-            "matches": current == expected,
+            "matches": matches,
             "status": status,
             "approval_mode": mode,
             "worktree": str(worktree),

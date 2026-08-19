@@ -15,6 +15,7 @@ from typing import Any, Iterator
 
 from .approval import utc_now_iso, verify_reviewed_snapshot
 from .atomic import atomic_write_json, read_json, run_scoped_lock
+from .control_adapter import ControlAdapterError, assert_candidate_transport
 from .runstate import RunStateError, validate_run
 from .snapshot import MANIFEST_FILENAME, SnapshotError, build_snapshot_manifest
 
@@ -490,6 +491,10 @@ def integrate_reviewed_snapshot(
             worktree=worktree,
             reviewed_hash=reviewed_hash,
         )
+        try:
+            assert_candidate_transport(run_dir, metadata, manifest, worktree)
+        except ControlAdapterError as exc:
+            raise IntegrationError(str(exc)) from exc
         commit_message = _validate_message(
             message
             if message is not None

@@ -42,6 +42,8 @@ Executar uma task versionada no `base-ref`:
 
 ```bash
 ./agent-loop run --repo /projetos/alvo docs/tasks/TASK-01.md 3 main
+./agent-loop run --repo /projetos/alvo --allow-candidate-profile \
+  docs/tasks/SELF-00A.md 3 main
 ```
 
 Revisar mudanças já existentes no checkout atual:
@@ -254,8 +256,11 @@ worktree e executar conscientemente os comandos Git de integração/publicação
 ## Perfil, ambiente e retomada
 
 O contrato atual está em [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md), incluindo
-schema TOML, bootstrap, ambiente externo `0600`, timeout por scope
-`systemd --user`, heartbeat, `agent-loop resume` e `agent-loop evidence`.
+schema TOML, adapter congelado versus profile candidato, bootstrap, ambiente
+externo `0600`, timeout por scope `systemd --user`, heartbeat, `agent-loop resume`
+e `agent-loop evidence`. Sem `--allow-candidate-profile`, a interface pública de
+`run`/`resume`/`verify`/`integrate` permanece a mesma para consumidores
+externos.
 
 ## Limpeza
 

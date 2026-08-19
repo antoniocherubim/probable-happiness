@@ -10,6 +10,8 @@ Um exemplo completo está em [`docs/examples/project.toml`](examples/project.tom
 O parser é estrito: tabelas/chaves desconhecidas, tipos incorretos, comandos
 vazios, variáveis inválidas e caminhos absolutos/com `..` são recusados. Cada
 comando é um array `argv`; nenhum valor passa por `eval` ou shell implícito.
+O run congela esse parser no commit-base; um profile candidato autorizado é
+validado com as mesmas regras e nunca relaxa o schema.
 
 | Campo | Tipo | Default/restrição |
 |---|---|---|
@@ -42,6 +44,40 @@ flag é a proteção aplicável quando ele está ausente.
 Templates são analisados sem `eval`. Documentação aceita somente `{task_id}` e
 `{task_slug}`. Placeholder desconhecido e caminho absoluto/com `..` bloqueiam o
 preflight.
+
+## Adapter congelado e profile candidato
+
+O default permanece fail-closed: sem autorização explícita, qualquer mudança em
+`.agent-loop/project.toml` continua recusada com a mensagem estável de profile
+imutável. A autorização é somente a flag de `agent-loop run`; ela é persistida
+no metadata do run e não pode ser inferida pelo nome da task nem pelo conteúdo
+candidato.
+
+```bash
+./agent-loop run --repo /repo --allow-candidate-profile \
+  docs/tasks/SELF-00A.md 3 main
+```
+
+Antes do executor, o run captura do commit-base o profile, as instruções
+rastreadas (incluindo `.agent-loop/{executor,reviewer}.md` só se já existirem
+nesse commit) e o script de entrypoint de bootstrap/gates. Um entrypoint
+configurado e ausente nesse commit falha na criação do run. Essa visão de
+controle fica em `control-adapter/` no diretório do run e permanece imutável em
+iterações e `resume`. Gates estáveis ainda recebem o worktree candidato como
+objeto de teste, mas o argv do gate é reescrito para a cópia congelada (ou para
+o blob Git do commit-base se o adapter ainda não estiver materializado). Flags
+de interpretador como `bash -e scripts/gate.sh` continuam a identificar o
+script; um arquivo criado ou substituído pelo candidato nesse caminho relativo
+não é executado. `python3 -m compileall` (e qualquer `python -m`) recebe `-P`
+para o módulo nomeado não ser carregado de um arquivo plantado no cwd do
+candidato; caminhos passados ao módulo continuam relativos ao worktree.
+
+Um profile candidato autorizado é validado como conteúdo de Engine/Adapter N+1
+e pode entrar no snapshot revisado. Ele nunca fornece bootstrap, validações,
+documentação obrigatória ou instruções ao run que o produz. `verify` e
+`integrate` transportam essa mudança somente quando a autorização registrada e
+o snapshot revisado coincidem; autorização ausente, adulterada ou divergente
+bloqueia antes da transição canônica.
 
 ## Documentação obrigatória
 
@@ -88,6 +124,8 @@ Arquivos ignorados, como `.venv/`, podem ser criados ou vinculados.
 ./agent-loop run --repo /repo \
   --env-file ~/.config/codex-cursor-agent-loop/projects/<repo-id>/test.env \
   docs/tasks/TASK.md 3 main
+./agent-loop run --repo /repo --allow-candidate-profile \
+  docs/tasks/SELF-00A.md 3 main
 ```
 
 Se a flag for omitida e esse arquivo XDG existir, ele é descoberto
@@ -154,8 +192,10 @@ APPROVED                -> valida manifesto/hash; não repete review
 
 O wrapper mantém `.resume.lock` durante toda a retomada. Antes de iniciar,
 valida metadados, task no base commit, `HEAD`, repositório comum do worktree,
-perfil congelado e hash pré-revisão. Drift durante/depois da revisão é recusado.
-Nos dois modos, `APPROVED` só é terminal com manifesto técnico válido.
+adapter de controle congelado e hash pré-revisão. Drift durante/depois da revisão
+é recusado. Nos dois modos, `APPROVED` só é terminal com manifesto técnico
+válido. `resume` não aceita `--allow-candidate-profile`; a autorização é a
+gravada na criação do run.
 
 ### Orçamento de iterações
 
@@ -213,8 +253,18 @@ técnico.
 - Há cotas por saída, arquivo e quantidade de artefatos, mas não uma cota total
   de disco acumulada entre runs/worktrees; arquivos brutos anteriores à
   sanitização podem sobreviver a uma morte abrupta do supervisor.
-- Runs congelam o perfil serializado. Uma versão futura que altere defaults ou
+- Runs congelam o perfil serializado e, nos runs novos, também o adapter de
+  controle capturado do commit-base. Uma versão futura que altere defaults ou
   schema precisa de migração explícita para não tornar runs antigos incompatíveis.
+- A captura de entrypoints cobre o script nomeado no argv do gate após flags do
+  interpretador (`bash -e`, …), não helpers sourced internamente nem arquivos
+  puxados por `--rcfile`/`--init-file`. `python3 -m` não carrega o módulo
+  nomeado do cwd do candidato (`-P` no rewrite). `PYTHONPATH` autorizado que
+  aponte para o worktree, bem como `python3 -c` e `bash -c`, ainda podem
+  resolver código a partir do candidato.
+- Adulteração deliberada do manifesto congelado e do metadata pelo mesmo UID
+  continua fora do modelo de ameaça autenticado; hashes detectam drift e
+  corrupção acidental.
 - Autenticação e políticas server-side do remote ficam integralmente no fluxo
   Git manual do operador.
 - `SIGKILL` aplicado ao próprio supervisor pode impedir sua gravação final; o

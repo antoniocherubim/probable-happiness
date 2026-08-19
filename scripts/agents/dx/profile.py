@@ -202,21 +202,18 @@ def _template(value: Any, field: str, default: str, allowed: set[str]) -> str:
     return value
 
 
-def load_project_profile(repo: Path | str, *, missing_policy: str = "allow") -> ProjectProfile:
-    repo_path = Path(repo).resolve()
-    path = repo_path / PROFILE_RELATIVE_PATH
-    if not path.exists():
-        if missing_policy == "deny":
-            raise ProfileError(f"project profile is required: {path}")
-        if missing_policy != "allow":
-            raise ProfileError("missing profile policy must be 'allow' or 'deny'")
-        return ProjectProfile(missing_profile=missing_policy)
-    if path.is_symlink() or not path.is_file():
-        raise ProfileError(f"project profile must be a regular non-symlink file: {path}")
+def parse_project_profile_text(text: str, *, path: Path | None = None) -> ProjectProfile:
+    """Parse a project profile from TOML text without activating it."""
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
         raise ProfileError(f"cannot parse project profile: {exc}") from exc
+    return _parse_project_profile_data(data, path=path)
+
+
+def _parse_project_profile_data(
+    data: dict[str, Any], *, path: Path | None = None
+) -> ProjectProfile:
     if not isinstance(data, dict):
         raise ProfileError("project profile must be a TOML table")
     allowed_top = {"schema_version", *_SAFE_SECTIONS}
@@ -329,6 +326,53 @@ def load_project_profile(repo: Path | str, *, missing_policy: str = "allow") -> 
             high=300,
         ),
     )
+
+
+def load_project_profile(repo: Path | str, *, missing_policy: str = "allow") -> ProjectProfile:
+    repo_path = Path(repo).resolve()
+    path = repo_path / PROFILE_RELATIVE_PATH
+    if not path.exists():
+        if missing_policy == "deny":
+            raise ProfileError(f"project profile is required: {path}")
+        if missing_policy != "allow":
+            raise ProfileError("missing profile policy must be 'allow' or 'deny'")
+        return ProjectProfile(missing_profile=missing_policy)
+    if path.is_symlink() or not path.is_file():
+        raise ProfileError(f"project profile must be a regular non-symlink file: {path}")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ProfileError(f"cannot parse project profile: {exc}") from exc
+    return parse_project_profile_text(text, path=path)
+
+
+def load_project_profile_from_git(
+    repo: Path | str,
+    commit: str,
+    *,
+    missing_policy: str = "allow",
+) -> ProjectProfile:
+    """Load the tracked profile blob from a commit without reading the worktree."""
+    from .control_adapter import read_git_blob
+
+    repo_path = Path(repo).resolve()
+    blob = read_git_blob(repo_path, commit, str(PROFILE_RELATIVE_PATH))
+    if blob is None:
+        if missing_policy == "deny":
+            raise ProfileError(
+                f"project profile is required: {PROFILE_RELATIVE_PATH}@{commit}"
+            )
+        if missing_policy != "allow":
+            raise ProfileError("missing profile policy must be 'allow' or 'deny'")
+        return ProjectProfile(missing_profile=missing_policy)
+    mode, content = blob
+    if mode == "120000":
+        raise ProfileError("project profile must be a regular non-symlink file")
+    try:
+        text = content.decode("utf-8")
+    except UnicodeError as exc:
+        raise ProfileError(f"cannot parse project profile: {exc}") from exc
+    return parse_project_profile_text(text, path=repo_path / PROFILE_RELATIVE_PATH)
 
 
 def load_environment_file(path: Path | str | None) -> dict[str, str]:

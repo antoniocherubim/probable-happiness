@@ -1,6 +1,7 @@
 # Roadmap — self-hosting e observabilidade
 
-Status desta fase: backlog planejado; nenhuma feature abaixo está implementada.
+Status desta fase: `SELF-00P` implementada neste worktree, com evidência de
+teste abaixo; as demais features do DAG continuam no backlog planejado.
 
 O objetivo é evoluir o harness por verification-driven agentic execution,
 mantendo Engine N como controller estável do candidate Engine N+1. Aprovação e
@@ -9,14 +10,20 @@ operador. Não há push, deploy ou autoridade remota no runtime.
 
 ## P0 de bootstrap obrigatório
 
-- [ ] `SELF-00P` — separar adapter de controle congelado do adapter candidato.
+- [x] `SELF-00P` — separar adapter de controle congelado do adapter candidato.
 
-Essa predecessora é o menor ajuste técnico à ordem solicitada. O engine atual
-recusa qualquer mudança em `.agent-loop/project.toml` e lê instruções do
-worktree candidato; portanto `SELF-00A` não pode atualizar o gate nem criar
-`reviewer.md` com segurança antes de `SELF-00P`. Ela é um must-have técnico
-adicional e a primeira task a executar; não altera a prioridade relativa dos
-seis itens solicitados abaixo.
+Evidência (2026-08-19, Python canônico `venv/bin/python -m pytest -q`):
+240 passed, 0 failed, 0 skipped, 0 errors em 67.26s;
+`python3 -m compileall -q scripts/agents`, `bash -n agent-loop scripts/agents/*.sh`
+e `git diff --check` saíram 0. Sem SHA/URL de branch: a integração ainda não
+ocorreu.
+
+Essa predecessora é o menor ajuste técnico à ordem solicitada. O engine passa a
+recusar mudança de `.agent-loop/project.toml` salvo `--allow-candidate-profile`,
+e lê instruções/gates do adapter congelado no commit-base. `SELF-00A` pode agora
+atualizar o gate e criar `reviewer.md` sem controlar a própria avaliação. Ela é
+um must-have técnico adicional já executado; não altera a prioridade relativa
+dos seis itens solicitados abaixo.
 
 ## Must-have até sexta-feira
 
@@ -62,7 +69,8 @@ SELF-00P → SELF-00A → PROV-01A → PROV-01B → SELF-01A
 
 ## Disciplina de execução
 
-- Todas as tasks permanecem `planned` neste commit de planejamento.
+- Todas as tasks permanecem `planned` neste commit de planejamento, exceto
+  `SELF-00P`, atualizada para `completed` com evidência real deste run.
 - Cada run deve atualizar sua própria task e este roadmap com comandos,
   contagens e riscos reais; evidência não é preenchida antecipadamente.
 - Uma task nunca usa a feature que está criando como único gate de validação.

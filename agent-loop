@@ -14,7 +14,7 @@ DX_CLI="$TOOL_ROOT/scripts/agents/telegram_bridge.py"
 usage() {
   printf '%s\n' \
     "Usage:" \
-    "  agent-loop run --repo <path> [--state-root <path>] [--env-file <path>] [--require-profile] <task-file> [max-iterations] [base-ref]" \
+    "  agent-loop run --repo <path> [--state-root <path>] [--env-file <path>] [--require-profile] [--allow-candidate-profile] <task-file> [max-iterations] [base-ref]" \
     "  agent-loop review --repo <path> [--state-root <path>] [review options] <task-file>" \
     "  agent-loop resume --run-dir <path> [--review-only] [--additional-iterations <n>] [--env-file <path>]" \
     "  agent-loop evidence --run-dir <path> --file <report>" \
