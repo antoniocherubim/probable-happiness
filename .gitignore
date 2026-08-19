@@ -9,5 +9,4 @@ venv/
 archive/
 local/
 *.log
-docs/tasks/
 ROADMAP.md
