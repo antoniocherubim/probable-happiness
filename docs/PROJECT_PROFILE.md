@@ -1,5 +1,14 @@
 # Perfil de projeto e retomada segura
 
+Este documento é o contrato operacional detalhado do profile/adapter. Para a
+visão arquitetural e de pesquisa, veja [`ARCHITECTURE.md`](ARCHITECTURE.md) e
+[`RESEARCH_OVERVIEW.md`](RESEARCH_OVERVIEW.md).
+
+Após `SELF-00P`, é importante distinguir **adapter de controle do run corrente**
+de **adapter candidato proposto para runs futuros**. A autorização de mudança
+não transforma o candidato em controller; ela apenas permite que o conteúdo
+candidato atravesse review/integração se todos os bindings exigidos conferirem.
+
 O motor continua externo. Um repositório consumidor pode rastrear somente sua
 integração em `.agent-loop/project.toml`, instruções Markdown e scripts de
 bootstrap/teste. Estado, worktrees, evidências e credenciais permanecem no XDG.

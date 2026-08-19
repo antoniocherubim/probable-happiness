@@ -1,21 +1,31 @@
-# Orquestração externa Codex → Cursor → Codex
+# Orquestração externa — executor → validação → reviewer
 
 ## Fluxo
 
 ```text
 task versionada
   → worktree externo isolado
-  → Cursor executa
-  → Codex revisa diff, aceite e testes
-  → CHANGES_REQUESTED retorna ao Cursor (orçamento inicial de 1 a 5 ciclos)
-  → APPROVED técnico
+  → executor (Cursor na implementação atual)
+  → validações programáticas
+  → reviewer separado (Codex na implementação atual)
+  → CHANGES_REQUESTED retorna ao executor (orçamento inicial de 1 a 5 ciclos)
+  → APPROVED técnico vinculado ao conteúdo revisado
   ├─ approval.mode=none → conclusão local
-  └─ approval.mode=telegram → notificação terminal sem ações
-  → verificação manual antes de integrar
+  └─ approval.mode=telegram → conclusão local + notificação terminal
+  → verify opcional/read-only
+  → integrate local somente quando explicitamente acionado pelo operador
 ```
 
-Não há automação de decisão de produto, criação de task, commit, merge, push,
-tag, PR, deploy, limpeza ou próxima task. A integração Git é sempre manual.
+Não há automação de decisão de produto, criação de task, push, tag, PR, deploy,
+limpeza ou próxima task. `agent-loop integrate`, quando explicitamente acionado
+pelo operador, automatiza **somente a integração Git local** (criação do commit
+vinculado ao snapshot revisado + fast-forward). Publicação remota continua fora
+do runtime.
+
+A separação executor/reviewer é arquitetural; o runtime atual ainda está ligado
+a Cursor/Codex como implementações concretas. Veja
+[`ARCHITECTURE.md`](ARCHITECTURE.md) para guarantees/non-guarantees e
+[`RESEARCH_OVERVIEW.md`](RESEARCH_OVERVIEW.md) para o enquadramento de pesquisa.
 
 ## Pré-requisitos
 
@@ -79,8 +89,9 @@ Antes e depois da revisão, o runner calcula SHA-256 sobre:
 - tipo Git, bit executável e conteúdo de arquivos regulares;
 - bytes do destino de symlinks, sem seguir o link.
 
-Os hashes devem coincidir. O manifesto técnico em `APPROVED` vincula esse hash
-imutável nos modos `none` e `telegram`, mas não congela o worktree.
+Os hashes devem coincidir. O manifesto técnico em `APPROVED` vincula o valor de hash revisado nos modos
+`none` e `telegram`, mas não torna o worktree imutável. A garantia é um binding
+de aprovação ao conteúdo: drift posterior faz a verificação falhar.
 Para uma verificação somente-leitura:
 
 ```bash
@@ -168,7 +179,7 @@ Documentação:
 - README.md
 - docs/tasks/TASK-01.md
 
-Run finalizada. A integração permanece manual.
+Run finalizada. A integração local exige comando explícito do operador.
 ```
 
 Depois de todos os chunks do resumo, o notifier envia uma mensagem separada,
@@ -213,7 +224,7 @@ mutação. A ordem quando há composição é
 - `EXECUTING`: Cursor trabalhando;
 - `REVIEWING`: Codex avaliando;
 - `CHANGES_REQUESTED`: feedback retornará ao Cursor;
-- `APPROVED`: aceite técnico terminal, aguardando integração manual;
+- `APPROVED`: aceite técnico terminal, aguardando eventual `integrate` explícito;
 - `AWAITING_HUMAN_APPROVAL` e `HUMAN_APPROVED`: estados legados, aceitos somente
   para migração/verificação de runs antigos;
 - `BLOCKED`: falha, interrupção, dependência externa ou limite atingido.
@@ -237,9 +248,9 @@ notificação substituída durante envio.
 
 ```text
 APPROVED
-  ├─ mode=none     → verify → integração Git manual
+  ├─ mode=none     → verify opcional → integrate explícito/local
   └─ mode=telegram → enfileira notificação sem ações
-                     → verify → integração Git manual
+                     → verify opcional → integrate explícito/local
 
 CHANGES_REQUESTED em N = limite
   → BLOCKED/max_review_iterations
@@ -250,8 +261,9 @@ CHANGES_REQUESTED em N = limite
 ```
 
 FIFO/socket/device são recusados no snapshot; artefatos operacionais precisam
-estar ignorados. Depois de `agent-loop verify`, cabe ao operador inspecionar o
-worktree e executar conscientemente os comandos Git de integração/publicação.
+estar ignorados. Depois do aceite, cabe ao operador decidir conscientemente entre descartar,
+inspecionar/`verify` ou executar `agent-loop integrate`. A publicação remota, se
+desejada, continua sendo feita fora do runtime.
 
 ## Perfil, ambiente e retomada
 

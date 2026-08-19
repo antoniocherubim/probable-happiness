@@ -8,6 +8,22 @@ mantendo Engine N como controller estável do candidate Engine N+1. Aprovação 
 integração continuam content-bound, locais e explicitamente acionadas pelo
 operador. Não há push, deploy ou autoridade remota no runtime.
 
+## Baselines de pesquisa
+
+- **E0 — baseline orgânica:** tag `self-hosting-bootstrap` (`785485f`), imediatamente
+  antes da implementação de `SELF-00P`. Preserva o artefato que surgiu do uso
+  prático antes do hardening deliberado desta fase.
+- **E1 — primeiro hardening self-hosted:** commit `bb00503`, que integra
+  `SELF-00P` e a separação entre adapter de controle congelado e adapter
+  candidato.
+
+A documentação de apresentação/pesquisa (`docs/ARCHITECTURE.md`,
+`docs/RESEARCH_OVERVIEW.md` e `docs/EVALUATION_PLAN.md`) possui agora uma
+baseline inicial sobre E1. `DOC-01A` permanece planejada como **sincronização
+final** após `SELF-01A` e `OBS-01A`, quando provenance/stable-controller/export
+estruturado puderem ser descritos como mecanismos implementados em vez de
+roadmap.
+
 ## P0 de bootstrap obrigatório
 
 - [x] `SELF-00P` — separar adapter de controle congelado do adapter candidato.
@@ -76,6 +92,12 @@ SELF-00P → SELF-00A → PROV-01A → PROV-01B → SELF-01A
 - Uma task nunca usa a feature que está criando como único gate de validação.
 - Em self-hosting, o candidate runtime nunca substitui o controller do run que
   o produz.
+- Uma dependência só é considerada disponível para a próxima task depois de
+  `APPROVED` **e integração explícita ao estado canônico**; aprovação isolada no
+  worktree não satisfaz `depends_on`.
+- Mudanças no runtime devem preservar o contrato usado por consumidores externos
+  existentes; checks de compatibilidade não devem exigir modificar o
+  `artang-platform`.
 - `artang-platform` permanece somente evidência de consumo externo e não é
   modificado por este roadmap.
 - Ficam fora desta fase: multi-candidate search, tree-of-thought, planner swarm,

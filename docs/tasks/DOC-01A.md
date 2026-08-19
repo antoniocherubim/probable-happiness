@@ -10,14 +10,16 @@ depends_on:
 
 ## Contexto
 
-Depois do bootstrap self-hosted, provenance, stable controller e export
-estruturado, a documentação poderá apresentar mecanismos implementados e um
-plano de avaliação sem transformar hipóteses em resultados.
+Uma baseline de documentação voltada à apresentação já existe sobre o estado
+pós-`SELF-00P`. Depois de provenance, stable controller e export estruturado,
+esta task fará a sincronização final para que esses mecanismos possam ser
+descritos como implementados, sem transformar hipóteses em resultados.
 
 ## Objetivo
 
-Reorganizar a documentação para uma apresentação técnica e de pesquisa precisa,
-separando mecanismo, observação, hipótese e experimento ainda não realizado.
+Revisar e sincronizar a documentação técnica/de pesquisa com o estado final do
+P0, preservando a separação entre mecanismo, observação, hipótese e experimento
+ainda não realizado.
 
 ## Escopo permitido
 

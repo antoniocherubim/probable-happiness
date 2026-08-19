@@ -1,40 +1,159 @@
-# Codex Cursor Agent Loop
+# Probable Happiness
 
-Runner externo para executar uma task com Cursor Agent, revisar o resultado com
-Codex e preservar um snapshot verificável. O envio da conclusão pelo Telegram é
-opcional.
+**Verification-driven agentic execution harness for software changes.**
 
-A implementação atual é o [Personal Core v2](docs/PERSONAL_CORE_V2.md): um
-núcleo pequeno, exclusivamente local e voltado ao uso pessoal. A linha anterior
-permanece disponível no histórico Git, sem seus mecanismos de transactions,
-migrations e audit trail no runtime atual.
+`probable-happiness` é um harness local para executar mudanças de software com
+agentes de IA sem conceder ao agente executor autoridade unilateral sobre o
+estado canônico do repositório. A implementação atual usa **Cursor Agent** como
+executor e **Codex** como reviewer, combinando execução em worktree isolado,
+validação programática, revisão separada, aprovação vinculada ao conteúdo e
+integração Git local explicitamente acionada pelo operador.
 
-Projetos consumidores podem declarar bootstrap, ambiente allowlisted, timeouts,
-heartbeat, validações e documentação obrigatória em
-`.agent-loop/project.toml`. Runs interrompidos
-podem ser retomados sem descartar o worktree, e evidência complementar permanece
-não confiável até nova revisão. Veja [Perfil e retomada segura](docs/PROJECT_PROFILE.md).
+O projeto nasceu da automação de um workflow pessoal de desenvolvimento. Ele não
+foi originalmente desenhado como experimento acadêmico. A documentação de
+pesquisa adicionada posteriormente separa cuidadosamente **mecanismos já
+implementados**, **observações de uso**, **hipóteses** e **experimentos ainda não
+realizados**.
 
-As mudanças de estado passam por uma tabela tipada e compare-and-set sob
-`.state.lock`; eventos inválidos falham sem substituir o estado anterior.
+## Ideia central
 
-O projeto é mantido para uso pessoal, sem compromisso de distribuição ou
-compatibilidade para terceiros.
+```text
+task versionada
+      │
+      ▼
+candidate worktree isolado
+      │
+      ▼
+executor (Cursor, hoje)
+      │
+      ▼
+validações programáticas
+      │
+      ▼
+reviewer separado (Codex, hoje)
+      │
+      ├── CHANGES_REQUESTED ──► nova iteração
+      │
+      └── APPROVED
+              │
+              ▼
+     manifesto + hash revisado
+              │
+              ▼
+   verify / integrate explícito
+              │
+              ▼
+      branch local canônica
+```
 
-O runner não faz commit, push, merge, tag, PR ou deploy. Após o aceite técnico,
-ele preserva o worktree e o hash revisado para integração Git manual.
-Não existe configuração de publicação; uma tabela `[delivery]` é recusada como
-desconhecida.
+A mudança candidata permanece fora da branch canônica durante execução e
+review. Uma aprovação válida fica vinculada ao conteúdo revisado por manifesto
+e hashes. O worktree em si **não é imutável**: drift posterior é detectado e
+bloqueia `verify`/`integrate`.
 
-Executor, validações e reviewer recebem `GIT_ALLOW_PROTOCOL=file`; Git recusa
-transportes remotos antes de abrir conexão, inclusive quando chamado por caminho
-absoluto. Isso não é um namespace de rede e não bloqueia clientes HTTP genéricos;
-repositórios deliberadamente hostis permanecem fora do modelo suportado.
+`agent-loop integrate` é uma operação local e explícita: revalida o snapshot,
+constrói um commit a partir dos bytes vinculados ao manifesto usando um index
+temporário e avança a branch somente por fast-forward. O runtime não executa
+`fetch`, `pull`, `push`, criação de PR, deploy ou outra publicação remota.
+
+## Estado atual
+
+A baseline orgânica anterior ao hardening de self-hosting está preservada na
+tag `self-hosting-bootstrap` (`785485f`). A primeira mudança de hardening,
+`SELF-00P`, foi integrada em `bb00503` e introduziu **controlled
+project-adapter evolution**.
+
+No estado pós-`SELF-00P`:
+
+- profile, instruções e entrypoints relevantes do adapter que controlam um run
+  são capturados do commit-base;
+- alterar `.agent-loop/project.toml` continua fail-closed por padrão;
+- `--allow-candidate-profile` autoriza explicitamente que um profile candidato
+  seja revisado como conteúdo para runs futuros, sem fazê-lo controlar o run
+  que o produz;
+- gates de script relativos são resolvidos a partir da visão congelada do
+  adapter quando aplicável;
+- `python -m` reescrito usa `-P` quando necessário para impedir que um módulo
+  plantado no cwd do candidate worktree substitua o módulo do gate;
+- `resume`, `verify` e `integrate` reusam/verificam os bindings de controle
+  aplicáveis ao run.
+
+A implementação de `SELF-00P` foi aprovada na terceira iteração. A evidência
+registrada na task inclui uma execução completa de `240 passed` em ambiente com
+`systemd --user`. Esse caso é **ilustrativo**, não uma demonstração estatística
+de superioridade da arquitetura.
+
+## O que o sistema garante — dentro do modelo de confiança declarado
+
+O runtime implementa mecanismos para:
+
+- isolar o estado candidato da branch local canônica durante execução/review;
+- separar a fase de execução da fase de review;
+- executar validações não-LLM configuradas pelo projeto;
+- detectar mutação do candidate worktree durante a revisão;
+- vincular aprovação técnica ao conteúdo revisado;
+- detectar drift entre aprovação e integração;
+- serializar transições relevantes por máquina de estados e locks locais;
+- manter integração local separada e explicitamente acionada;
+- preservar runs/worktrees interrompidos para retomada controlada.
+
+Esses mecanismos **não** significam que:
+
+- o reviewer esteja semanticamente correto;
+- testes passando provem correção do software;
+- o projeto forneça verificação formal;
+- processos deliberadamente hostis sob o mesmo UID sejam isolados
+  criptograficamente;
+- todo comando de validação configurável seja intrinsecamente determinístico;
+- o sistema implemente *Speculative Reasoning* no sentido de raciocínio
+  especulativo durante inferência de LLM.
+
+Uma descrição mais precisa é **verification-driven agentic execution**, com
+execução candidata/especulativa no nível de ação/estado.
+
+## Uso em outros projetos
+
+O harness continua externo ao repositório-alvo. Um projeto consumidor mantém sua
+policy local — por exemplo profile, instruções, bootstrap e gates — sem copiar o
+núcleo do loop.
+
+O `artang-platform` é um consumidor real desse modelo: mantém uma camada local
+específica do projeto para dependências de tasks, bootstrap, validações e regras
+arquiteturais, enquanto aponta para a instalação externa do harness. Esse uso é
+tratado como **evidência de reutilização/uso longitudinal**, não como prova de
+melhor confiabilidade.
+
+A arquitetura de adapter ainda está sendo formalizada no roadmap; hoje ela é
+uma fronteira observável na implementação, não um framework genérico de plugins.
+Da mesma forma, os papéis conceituais de executor/reviewer ainda estão ligados a
+Cursor/Codex no runtime atual; a separação entre papel e vendor driver é trabalho
+planejado.
+
+## Pesquisa
+
+O projeto pode servir como artefato para investigar a pergunta:
+
+> **Como permitir que agentes probabilísticos proponham mudanças em software sem
+> conceder-lhes autoridade unilateral sobre quais estados se tornam canônicos?**
+
+A documentação voltada a pesquisa está em:
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — arquitetura, trust boundaries,
+  garantias e não-garantias;
+- [`docs/RESEARCH_OVERVIEW.md`](docs/RESEARCH_OVERVIEW.md) — problema, hipóteses,
+  perguntas de pesquisa e evidência já disponível;
+- [`docs/EVALUATION_PLAN.md`](docs/EVALUATION_PLAN.md) — desenho experimental
+  proposto, métricas e ameaças à validade;
+- [`ROADMAP.md`](ROADMAP.md) — hardening e observabilidade planejados.
+
+Não há, neste momento, alegação de novidade acadêmica, ganho causal de
+confiabilidade ou superioridade frente a baselines. Uma revisão bibliográfica
+sistemática e os experimentos comparativos ainda precisam ser realizados.
 
 ## Preparação
 
 O runtime requer Python 3.11 ou posterior e ferramentas do sistema. `pytest` é
-necessário somente para desenvolvimento:
+necessário para desenvolvimento:
 
 ```bash
 python3 -m venv venv
@@ -46,8 +165,6 @@ Cursor Agent e Codex CLI autenticados.
 
 ## Uso externo
 
-O projeto-alvo não recebe scripts nem estado do runner:
-
 ```bash
 ./agent-loop run --repo /caminho/do/projeto docs/tasks/TASK-01.md 3 main
 ./agent-loop run --repo /caminho/do/projeto --allow-candidate-profile \
@@ -56,6 +173,8 @@ O projeto-alvo não recebe scripts nem estado do runner:
 ./agent-loop resume --run-dir /caminho/externo/para/o/run
 ./agent-loop resume --run-dir /caminho/externo/para/o/run --additional-iterations 3
 ./agent-loop evidence --run-dir /caminho/externo/para/o/run --file /tmp/relatorio.txt
+./agent-loop verify --run-dir /caminho/externo/para/o/run
+./agent-loop integrate --run-dir /caminho/externo/para/o/run
 ```
 
 Por padrão, runs e worktrees ficam em:
@@ -68,87 +187,60 @@ Sem `XDG_STATE_HOME`, usa `~/.local/state`. `--state-root` permite outro local.
 O identificador inclui o caminho canônico do Git, isolando repositórios com o
 mesmo nome e aliases por symlink.
 
+## Profile e self-hosting
+
+Projetos podem declarar bootstrap, ambiente allowlisted, timeouts, heartbeat,
+validações e documentação obrigatória em `.agent-loop/project.toml`.
+
+Por padrão, um candidato não pode trocar o profile que controla seu próprio
+run. Para uma task que **deliberadamente** evolui o adapter, a autorização deve
+ser explícita na criação do run:
+
+```bash
+./agent-loop run \
+  --repo "$PWD" \
+  --require-profile \
+  --allow-candidate-profile \
+  docs/tasks/SELF-00A.md \
+  3 \
+  HEAD
+```
+
+O profile candidato é conteúdo de uma possível próxima versão. O run corrente
+continua governado pela visão de controle congelada do commit-base, dentro das
+limitações documentadas em
+[`docs/PROJECT_PROFILE.md`](docs/PROJECT_PROFILE.md).
+
 ## Notificação opcional
 
-O perfil escolhe explicitamente:
+O profile escolhe:
 
 ```toml
 [approval]
-mode = "none"      # termina em APPROVED após review e verificação local
-# mode = "telegram"  # também envia uma notificação terminal
+mode = "none"       # conclusão local
+# mode = "telegram" # conclusão local + notificação terminal
 ```
 
-O default de compatibilidade é `telegram`. Nos dois modos, um review válido
-termina em `APPROVED` e `verify` aceita o manifesto técnico congelado. Em
-`none`, nenhum outbox Telegram é criado. Em `telegram`, configure o token e o
-ID numérico do chat fora do Git conforme
-[`docs/AGENT_ORCHESTRATION.md`](docs/AGENT_ORCHESTRATION.md), então execute:
-
-```bash
-./agent-loop serve
-```
-
-Execute somente uma instância da ponte por bot. A ponte mantém uma trava local
-por token e recusa uma segunda instância, mesmo que ela aponte para outro state
-root. Uma única ponte descobre runs de múltiplos projetos e usa somente
-`sendMessage`: não consulta updates, não recebe callbacks e não exibe botões.
-Falha ou ausência da ponte não impede a conclusão do run; o outbox permanece
-pendente para uma tentativa posterior.
-
-Para integrar o snapshot aprovado na branch local atualmente selecionada:
-
-```bash
-./agent-loop integrate --run-dir /caminho/externo/para/o/run
-```
-
-`integrate` verifica novamente estado, manifesto e hash; exige checkout limpo
-na branch cujo `HEAD` ainda é o commit-base; cria o commit a partir dos bytes
-revisados em um index temporário; desativa hooks e faz somente fast-forward
-local. O diff completo, incluindo arquivos antes não rastreados, passa por
-`git diff --check` antes da atualização. O comando é idempotente, preserva o
-worktree de auditoria e nunca
-executa fetch, pull, push ou qualquer transporte Git. A publicação remota
-continua manual. `verify` permanece disponível como inspeção sem mutação.
-
-## Extensão explícita de iterações
-
-Quando — e somente quando — o reviewer devolve `CHANGES_REQUESTED` na última
-iteração e o run termina em `BLOCKED` com motivo estruturado
-`max_review_iterations`, é possível autorizar novo orçamento:
-
-```bash
-./agent-loop resume \
-  --run-dir /state/projects/<repo>/runs/<run> \
-  --additional-iterations 3
-```
-
-Cada extensão aceita de 1 a 20 iterações; o limite efetivo total é 50. O
-`max_iterations` original na metadata de `state.json` não muda. A cadeia
-auditável fica no campo `iteration_budget` do mesmo arquivo, vinculada ao último
-feedback e hash revisado. Repetir o mesmo comando durante a extensão ativa é
-idempotente. Outras causas de `BLOCKED`, drift, estados de aprovação e
-combinação com `--review-only` são recusados sem novo orçamento.
-
-## systemd --user
-
-Gere a unidade com os caminhos reais da instalação:
-
-```bash
-./agent-loop systemd-unit \
-  --output ~/.config/systemd/user/agent-telegram-bridge.service
-systemd-analyze verify ~/.config/systemd/user/agent-telegram-bridge.service
-```
-
-O comando apenas gera o arquivo; não habilita nem inicia o serviço.
-
-A unidade endurecida libera escrita somente no state root. A bridge não
-executa Git e não precisa escrever no repositório.
+O default de compatibilidade é `telegram`. A ponte é exclusivamente de saída e
+não decide integração. Configuração e unidade `systemd --user` estão descritas
+em [`docs/AGENT_ORCHESTRATION.md`](docs/AGENT_ORCHESTRATION.md).
 
 ## Estrutura
 
-- `agent-loop`: CLI externa (`run`, `review`, `resume`, `evidence`, `serve`, `verify`, `systemd-unit`);
-- `scripts/agents/`: executor, revisor e ponte Telegram;
-- `scripts/agents/dx/`: estado, hash, concorrência, snapshot e cliente Bot API;
-- `.agents/reviewer-output.schema.json`: contrato de saída do revisor;
-- `tests/unit/`: suíte focada;
-- `docs/`: contrato atual, operação, perfil e exemplos mínimos.
+- `agent-loop`: CLI externa (`run`, `review`, `resume`, `evidence`, `serve`,
+  `verify`, `integrate`, `systemd-unit`);
+- `scripts/agents/run_task.sh`: ciclo executor → validação → reviewer;
+- `scripts/agents/dx/`: estado, locks, snapshot, adapter congelado, integração e
+  demais mecanismos locais;
+- `.agents/reviewer-output.schema.json`: contrato de saída do reviewer;
+- `.agent-loop/project.toml`: profile deste próprio repositório;
+- `tests/unit/`: suíte de regressão;
+- `docs/tasks/`: backlog versionado usado pelo próprio loop;
+- `docs/`: arquitetura, operação e proposta de avaliação.
+
+## Documentação operacional
+
+- [`docs/AGENT_ORCHESTRATION.md`](docs/AGENT_ORCHESTRATION.md)
+- [`docs/PROJECT_PROFILE.md`](docs/PROJECT_PROFILE.md)
+- [`docs/PERSONAL_CORE_V2.md`](docs/PERSONAL_CORE_V2.md) — registro histórico da
+  linha de implementação anterior ao hardening atual.
