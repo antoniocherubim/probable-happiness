@@ -73,8 +73,8 @@ No estado pós-`SELF-00P`, o harness possui mecanismos para:
 - detectar mutação do conteúdo durante review;
 - vincular `APPROVED` ao conteúdo revisado por manifesto/hashes;
 - revalidar bindings antes de integração;
-- integrar apenas após comando explícito do operador, localmente e sem Git
-  remoto;
+- integrar localmente após comando explícito ou publicar o snapshot aprovado
+  em branch/PR isolados quando o profile selecionar `github_pr`;
 - persistir estado e permitir retomada controlada;
 - congelar elementos do project adapter que governam o run enquanto uma versão
   candidata desse adapter é proposta para runs futuros.

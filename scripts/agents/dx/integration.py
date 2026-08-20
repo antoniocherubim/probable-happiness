@@ -32,7 +32,11 @@ class IntegrationError(ValueError):
 
 
 def _git_environment(*, index_file: Path | None = None) -> dict[str, str]:
-    environment = dict(os.environ)
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("AGENT_TELEGRAM_")
+    }
     environment.update(
         {
             "GIT_ALLOW_PROTOCOL": "file",
@@ -479,6 +483,12 @@ def integrate_reviewed_snapshot(
         if not verification.get("matches"):
             raise IntegrationError(
                 "live worktree no longer matches reviewed snapshot"
+            )
+        profile = metadata.get("profile")
+        approval = profile.get("approval") if isinstance(profile, dict) else None
+        if isinstance(approval, dict) and approval.get("mode") == "github_pr":
+            raise IntegrationError(
+                "manual integration is disabled for github_pr approval mode"
             )
 
         repo = Path(str(metadata["repo"])).resolve()

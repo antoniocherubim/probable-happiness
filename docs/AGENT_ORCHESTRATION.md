@@ -11,16 +11,16 @@ task versionada
   → CHANGES_REQUESTED retorna ao executor (orçamento inicial de 1 a 5 ciclos)
   → APPROVED técnico vinculado ao conteúdo revisado
   ├─ approval.mode=none → conclusão local
-  └─ approval.mode=telegram → conclusão local + notificação terminal
-  → verify opcional/read-only
-  → integrate local somente quando explicitamente acionado pelo operador
+  ├─ approval.mode=telegram → conclusão local + notificação terminal
+  └─ approval.mode=github_pr → commit/branch dedicados + push + PR
+     → review e merge humanos no GitHub
 ```
 
-Não há automação de decisão de produto, criação de task, push, tag, PR, deploy,
-limpeza ou próxima task. `agent-loop integrate`, quando explicitamente acionado
-pelo operador, automatiza **somente a integração Git local** (criação do commit
-vinculado ao snapshot revisado + fast-forward). Publicação remota continua fora
-do runtime.
+Não há automação de decisão de produto, criação de task, tag, merge, deploy,
+limpeza ou próxima task. `agent-loop integrate` automatiza somente a integração
+Git local quando explicitamente acionado. O modo opt-in `github_pr` é a única
+exceção remota: publica o snapshot tecnicamente aprovado em branch separada e
+abre o PR, sem aprová-lo nem fazer merge.
 
 A separação executor/reviewer é arquitetural; o runtime atual ainda está ligado
 a Cursor/Codex como implementações concretas. Veja
@@ -114,7 +114,30 @@ O integrador recompõe o commit pelo manifesto em um index temporário, desativa
 hooks, verifica whitespace no diff completo e permite apenas fast-forward
 local. Checkout sujo, drift, base
 divergente, manifesto adulterado ou ausência de aprovação abortam sem alterar
-a branch. Nenhum remoto é consultado ou modificado; push permanece manual.
+a branch. Nesse comando, nenhum remoto é consultado ou modificado.
+
+## Pull request no GitHub
+
+Com `[approval] mode = "github_pr"`, `remote` e `base_branch` devem estar
+explicitamente configurados. O run não conclui silenciosamente se a publicação
+falhar: permanece `APPROVED`, preserva o worktree e pode ser retomado com
+`agent-loop resume --run-dir ...`. A publicação é idempotente e não usa force.
+
+O preflight exige a GitHub CLI autenticada:
+
+```bash
+gh auth status --hostname github.com
+```
+
+Somente URLs HTTPS/SSH sem credenciais embutidas para `github.com` são aceitas.
+Antes de qualquer push, o controller confirma que a base remota ainda é o
+commit-base revisado. O commit é derivado do manifesto aprovado, a branch local
+canônica não se move e o PR é aberto como não-draft. Um humano decide review e
+merge no GitHub.
+
+Esse modo não carrega, cria ou envia mensagens Telegram. As variáveis
+`AGENT_TELEGRAM_*` são removidas dos processos Git/GitHub, e a ponte ignora runs
+congelados em `github_pr` mesmo que exista um arquivo de outbox plantado.
 
 ## Telegram
 
@@ -209,9 +232,9 @@ liberação de escrita somente para o state root.
 
 ### Limite intencional da unidade
 
-A ponte registra somente a entrega da notificação. Ela não executa Git e não escreve no
-repositório. O `EnvironmentFile` coloca o token do
-bot somente nesse processo; não existe worker de push no produto estável.
+A ponte registra somente a entrega da notificação. Ela não executa Git e não
+escreve no repositório. O `EnvironmentFile` coloca o token do bot somente nesse
+processo. A publicação `github_pr` ocorre no controller local e nunca na ponte.
 
 ## Estados e falhas
 
@@ -249,8 +272,10 @@ notificação substituída durante envio.
 ```text
 APPROVED
   ├─ mode=none     → verify opcional → integrate explícito/local
-  └─ mode=telegram → enfileira notificação sem ações
-                     → verify opcional → integrate explícito/local
+  ├─ mode=telegram → enfileira notificação sem ações
+  │                   → verify opcional → integrate explícito/local
+  └─ mode=github_pr → branch dedicada + push sem force + PR não-draft
+                       → review/merge humanos no GitHub
 
 CHANGES_REQUESTED em N = limite
   → BLOCKED/max_review_iterations
@@ -261,9 +286,10 @@ CHANGES_REQUESTED em N = limite
 ```
 
 FIFO/socket/device são recusados no snapshot; artefatos operacionais precisam
-estar ignorados. Depois do aceite, cabe ao operador decidir conscientemente entre descartar,
-inspecionar/`verify` ou executar `agent-loop integrate`. A publicação remota, se
-desejada, continua sendo feita fora do runtime.
+estar ignorados. Nos modos locais, depois do aceite cabe ao operador decidir
+conscientemente entre descartar, inspecionar/`verify` ou executar
+`agent-loop integrate`. Em `github_pr`, o controller publica o commit revisado e
+o operador decide no PR se aprova e faz merge.
 
 ## Perfil, ambiente e retomada
 

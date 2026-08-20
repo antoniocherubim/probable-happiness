@@ -41,6 +41,7 @@ from .control_adapter import (
     rewrite_frozen_entrypoint,
 )
 from .integration import IntegrationError, integrate_reviewed_snapshot
+from .github_pr import GitHubPullRequestError, publish_reviewed_pull_request
 from .paths import (
     PathConfigError,
     default_state_root,
@@ -234,6 +235,17 @@ def cmd_integrate_reviewed_snapshot(args: argparse.Namespace) -> int:
             message=args.message,
         )
     except (IntegrationError, OSError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_publish_reviewed_pull_request(args: argparse.Namespace) -> int:
+    """Publish an approved snapshot to its frozen GitHub PR destination."""
+    try:
+        result = publish_reviewed_pull_request(Path(args.run_dir))
+    except (GitHubPullRequestError, OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(result, indent=2, sort_keys=True))
@@ -835,6 +847,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--run-dir", required=True)
     p.add_argument("--message", default=None)
     p.set_defaults(func=cmd_integrate_reviewed_snapshot)
+
+    p = sub.add_parser(
+        "publish-reviewed-pr",
+        help="Publish a github_pr run to a reviewed branch and open its PR",
+    )
+    p.add_argument("--run-dir", required=True)
+    p.set_defaults(func=cmd_publish_reviewed_pull_request)
 
     p = sub.add_parser("serve", help="Send queued Telegram notifications")
     p.add_argument("--runs-root", default=None)

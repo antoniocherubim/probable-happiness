@@ -588,6 +588,129 @@ def test_finalize_reviewed_run_queues_notification_without_human_gate(
     assert not (run_dir / "human_approval_decision.json").exists()
 
 
+def test_finalize_reviewed_run_publishes_github_pr_without_telegram(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "github-pr"
+    worktree = tmp_path / "worktree"
+    run_dir.mkdir(parents=True)
+    worktree.mkdir()
+    review = run_dir / "review-1.json"
+    review.write_text('{"status":"APPROVED"}\n', encoding="utf-8")
+    command_log = tmp_path / "commands.log"
+    fake_dx = tmp_path / "fake_dx_github_pr.sh"
+    fake_dx.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env bash
+            set -euo pipefail
+            printf '%s\\n' "$1" >> {str(command_log)!r}
+            cmd="$1"
+            shift
+            case "$cmd" in
+              transition-state)
+                while [[ $# -gt 0 ]]; do
+                  case "$1" in
+                    --run-dir) run_dir="$2"; shift 2 ;;
+                    *) shift ;;
+                  esac
+                done
+                printf '%s\\n' APPROVED > "$run_dir/status"
+                ;;
+              verify-reviewed-snapshot)
+                exit 0
+                ;;
+              publish-reviewed-pr)
+                printf '%s\\n' '{{"result":"pull_request_opened"}}'
+                ;;
+              notify-*)
+                echo "Telegram command forbidden in github_pr mode" >&2
+                exit 98
+                ;;
+              *)
+                echo "unexpected command: $cmd" >&2
+                exit 99
+                ;;
+            esac
+            """
+        ),
+        encoding="utf-8",
+    )
+    fake_dx.chmod(fake_dx.stat().st_mode | stat.S_IXUSR)
+    reviewed_hash = "b" * 64
+    harness = textwrap.dedent(
+        f"""\
+        set -euo pipefail
+        AGENT_DX_CLI={str(fake_dx)!r}
+        RUN_DIR={str(run_dir)!r}
+        WORKTREE={str(worktree)!r}
+        BASE_COMMIT='deadbeef'
+        TASK_FILE='docs/tasks/PR-01.md'
+        TASK_ID='PR-01'
+        APPROVAL_MODE='github_pr'
+        source {str(AGENTS / "run_task.sh")!r}
+        finalize_reviewed_run {str(review)!r} {reviewed_hash!r}
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", harness],
+        cwd=str(REPO_ROOT),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "human approval and merge remain on GitHub" in completed.stdout
+    assert command_log.read_text(encoding="utf-8").splitlines() == [
+        "transition-state",
+        "verify-reviewed-snapshot",
+        "publish-reviewed-pr",
+    ]
+    assert not (run_dir / "telegram_notify.json").exists()
+
+
+def test_github_pr_failures_do_not_enqueue_telegram(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    command_log = tmp_path / "commands.log"
+    fake_dx = tmp_path / "fake_dx_no_telegram.sh"
+    fake_dx.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env bash
+            printf '%s\\n' "$1" >> {str(command_log)!r}
+            exit 97
+            """
+        ),
+        encoding="utf-8",
+    )
+    fake_dx.chmod(fake_dx.stat().st_mode | stat.S_IXUSR)
+    harness = textwrap.dedent(
+        f"""\
+        set -euo pipefail
+        AGENT_DX_CLI={str(fake_dx)!r}
+        RUN_DIR={str(run_dir)!r}
+        APPROVAL_MODE='github_pr'
+        source {str(AGENTS / "run_task.sh")!r}
+        notify_terminal_failure 'must remain local' '' failure
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", harness],
+        cwd=str(REPO_ROOT),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert not command_log.exists()
+    assert not (run_dir / "telegram_notify.json").exists()
+
+
 def test_telegram_bridge_service_is_rendered_for_paths_with_spaces(tmp_path: Path) -> None:
     """
     Repository path contains spaces; unit must parse WorkingDirectory / ExecStart /
@@ -962,6 +1085,7 @@ def test_signal_handler_blocks_active_run_and_preserves_worktree(tmp_path: Path)
         RUN_DIR={str(run_dir)!r}
         WORKTREE={str(worktree)!r}
         AGENT_DX_CLI={str(fake_dx)!r}
+        APPROVAL_MODE='telegram'
         source {str(AGENTS / "run_task.sh")!r}
         handle_loop_signal TERM 143
         """

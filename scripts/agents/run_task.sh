@@ -36,7 +36,7 @@ notify_terminal_failure() {
   local reason="$1"
   local report_hint="${2:-}"
   local kind="${3:-blocked}"
-  if [[ "${APPROVAL_MODE:-telegram}" == "none" ]]; then
+  if [[ "${APPROVAL_MODE:-}" != "telegram" ]]; then
     return 0
   fi
   if [[ -z "${RUN_DIR:-}" || ! -d "${RUN_DIR:-}" ]]; then
@@ -48,6 +48,13 @@ notify_terminal_failure() {
     --report-hint "$report_hint" \
     --kind "$kind" \
     >/dev/null 2>&1 || true
+}
+
+drop_telegram_environment() {
+  local name
+  while IFS= read -r name; do
+    unset "$name"
+  done < <(compgen -A variable AGENT_TELEGRAM_ || true)
 }
 
 transition_run_state() {
@@ -143,12 +150,24 @@ finalize_reviewed_run() {
       note "warning: failed to enqueue terminal Telegram notification"
     fi
     note "technical APPROVED finalized; Telegram notification queued without actions"
+    note "reviewed diff_hash=${reviewed_diff_hash}"
+    note "no commit or push was attempted; integrate the preserved worktree manually"
+  elif [[ "$APPROVAL_MODE" == "github_pr" ]]; then
+    note "technical APPROVED finalized; Telegram is disabled"
+    note "reviewed diff_hash=${reviewed_diff_hash}"
+    if ! DX_CLI publish-reviewed-pr --run-dir "$RUN_DIR"; then
+      note "GitHub PR publication failed; reviewed worktree remains preserved"
+      note "retry safely with: ./agent-loop resume --run-dir $RUN_DIR"
+      exit 1
+    fi
+    note "reviewed commit pushed to a dedicated branch and pull request opened"
+    note "human approval and merge remain on GitHub"
   else
     note "technical APPROVED finalized locally; Telegram is disabled"
+    note "reviewed diff_hash=${reviewed_diff_hash}"
+    note "no commit or push was attempted; integrate the preserved worktree manually"
   fi
 
-  note "reviewed diff_hash=${reviewed_diff_hash}"
-  note "no commit or push was attempted; integrate the preserved worktree manually"
   note "worktree preserved: $WORKTREE"
   exit 0
 }
@@ -261,13 +280,25 @@ _run_task_entry() {
     DX_CLI profile --repo "$REPO_ROOT" --base-commit "$BASE_COMMIT" \
       --missing-policy "$PROFILE_MISSING_POLICY" >/dev/null || \
       die "invalid or required .agent-loop/project.toml"
+    APPROVAL_MODE="$(DX_CLI approval-mode --repo "$REPO_ROOT" \
+      --base-commit "$BASE_COMMIT" --missing-policy "$PROFILE_MISSING_POLICY")" || \
+      die "invalid approval mode in base commit"
+  fi
+  if [[ "$APPROVAL_MODE" == "github_pr" ]]; then
+    drop_telegram_environment
   fi
 
   if [[ -n "$RESUME_RUN_DIR" && "$START_PHASE" == "complete" ]]; then
     DX_CLI verify-reviewed-snapshot --run-dir "$RUN_DIR" >/dev/null || \
       die "approved run no longer matches reviewed snapshot"
     note "run already approved and snapshot still matches"
-    note "integration remains manual"
+    if [[ "$APPROVAL_MODE" == "github_pr" ]]; then
+      DX_CLI publish-reviewed-pr --run-dir "$RUN_DIR" || \
+        die "GitHub PR publication failed; retry resume after correcting credentials or remote state"
+      note "GitHub pull request is published; human approval and merge remain on GitHub"
+    else
+      note "integration remains manual"
+    fi
     exit 0
   fi
   if [[ -n "$RESUME_RUN_DIR" && "$START_PHASE" == "awaiting_human" ]]; then

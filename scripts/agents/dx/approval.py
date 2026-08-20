@@ -337,6 +337,10 @@ def enqueue_notification(
     run_dir = Path(run_dir)
     if kind not in {"approved", "awaiting_human_approval", "blocked", "failure"}:
         raise ApprovalError(f"unsupported notify kind: {kind}")
+    if _frozen_approval_mode(run_dir) != "telegram":
+        raise ApprovalError(
+            "Telegram notification is forbidden for this approval mode"
+        )
 
     if kind == "awaiting_human_approval":
         with run_scoped_lock(run_dir, lock_name=LOCK_FILENAME):
@@ -387,6 +391,24 @@ def truncate_message(text: str, limit: int = MESSAGE_SOFT_LIMIT) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 16)].rstrip() + "\n…[truncated]"
+
+
+def _frozen_approval_mode(run_dir: Path) -> str:
+    try:
+        state = read_state_document(run_dir)
+    except StateTransitionError as exc:
+        raise ApprovalError(f"cannot inspect frozen approval mode: {exc}") from exc
+    metadata = state.get("metadata") if state else None
+    profile = metadata.get("profile") if isinstance(metadata, dict) else None
+    # Pre-profile legacy fixtures/runs used Telegram and have no immutable
+    # profile metadata. New runs always persist an explicit approval mode.
+    if profile is None:
+        return "telegram"
+    approval = profile.get("approval") if isinstance(profile, dict) else None
+    mode = approval.get("mode") if isinstance(approval, dict) else None
+    if mode not in {"none", "telegram", "github_pr"}:
+        raise ApprovalError("frozen approval mode is missing or invalid")
+    return str(mode)
 
 
 def load_request(run_dir: Path) -> dict[str, Any]:
@@ -639,7 +661,7 @@ def verify_reviewed_snapshot(run_dir: Path) -> dict[str, Any]:
         profile = metadata.get("profile") if isinstance(metadata, dict) else None
         approval = profile.get("approval") if isinstance(profile, dict) else None
         mode = approval.get("mode") if isinstance(approval, dict) else None
-        if mode not in {"none", "telegram"}:
+        if mode not in {"none", "telegram", "github_pr"}:
             raise ApprovalError("terminal technical APPROVED has invalid notification mode")
         manifest_path = run_dir / "reviewed_manifest.json"
         try:
@@ -769,6 +791,11 @@ def list_pending_notifications(runs_root: Path) -> list[tuple[Path, dict[str, An
     notify_paths = {path for pattern in patterns for path in runs_root.glob(pattern)}
     for notify_path in sorted(notify_paths):
         child = notify_path.parent
+        try:
+            if _frozen_approval_mode(child) != "telegram":
+                continue
+        except ApprovalError:
+            continue
         try:
             payload = read_json(notify_path)
         except (OSError, ValueError, json.JSONDecodeError):

@@ -55,14 +55,13 @@ CHANGES_REQUESTED   APPROVED
                  reviewed manifest
                    + content hash
                         │
-                        ▼
-                 verify (read-only)
-                        │
-                        ▼
-              integrate (explicit)
-                        │
-                        ▼
-               local canonical branch
+              ┌─────────┴─────────┐
+              ▼                   ▼
+      verify + integrate       github_pr publish
+          (explicit)          (dedicated branch)
+              │                   │
+              ▼                   ▼
+     local canonical branch    human-reviewed PR
 ```
 
 O runtime atual possui papéis distintos de executor e reviewer, mas ainda não
@@ -138,7 +137,7 @@ verificação deixa de corresponder ao conteúdo aprovado e a integração falha
 Por isso a terminologia correta é **content-bound approval** ou
 **content-addressed review binding**, e não "immutable stored snapshot".
 
-### Explicit local integration
+### Integração local ou publicação isolada
 
 `agent-loop integrate` é uma ação explícita do operador. Ela:
 
@@ -152,8 +151,10 @@ Por isso a terminologia correta é **content-bound approval** ou
 8. avança apenas por fast-forward local.
 
 O comando **faz commit e fast-forward local quando explicitamente solicitado**.
-O que o runtime não faz é integração/publicação remota automática: não executa
-`fetch`, `pull`, `push`, PR ou deploy.
+Nos modos `none` e `telegram`, não há publicação remota. No modo explícito
+`github_pr`, o controller reutiliza a construção segura do commit, mantém a
+branch canônica intacta, publica uma branch dedicada sem force e abre um PR
+não-draft. Merge, deploy e decisão humana permanecem fora do runtime.
 
 ## Máquina de estados
 
@@ -276,10 +277,10 @@ Programmatic validators
   fornecem evidência externa ao LLM conforme profile
 
 Operator
-  decide explicitamente se executa integrate/push/deploy
+  configura o modo e decide explicitamente integrate ou review/merge do PR
 
 Remote repository
-  não faz parte do runtime automático
+  recebe somente branch/PR no modo github_pr; aplica suas próprias proteções
 ```
 
 ### Modelo de confiança
@@ -303,6 +304,8 @@ não bloqueia clientes HTTP genéricos.
 | Aprovação vinculada ao conteúdo revisado | Implementado |
 | Drift pós-review detectado antes da integração | Implementado |
 | Integração local explícita e sem Git remoto | Implementado |
+| Branch dedicada + PR sem merge no modo `github_pr` | Implementado |
+| Exclusão de comunicação Telegram no modo `github_pr` | Implementado |
 | Adapter de controle congelado para self-hosting/profile evolution | Implementado em `SELF-00P` |
 | Provenance exata da versão do engine em todo run | Planejado |
 | Fail-closed geral ao retomar run com engine diferente | Planejado |

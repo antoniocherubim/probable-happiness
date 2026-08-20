@@ -164,7 +164,7 @@ def test_profile_rejects_every_delivery_section(tmp_path: Path) -> None:
             load_project_profile(repo)
 
 
-def test_remote_git_surface_is_absent() -> None:
+def test_remote_git_surface_is_isolated_from_agents_and_local_modes() -> None:
     for path in (
         REPO_ROOT / "agent-loop",
         AGENTS / "run_task.sh",
@@ -179,6 +179,10 @@ def test_remote_git_surface_is_absent() -> None:
     run_task = (AGENTS / "run_task.sh").read_text(encoding="utf-8")
     assert "Do not commit, push, merge, deploy, or access secrets." in run_task
     assert "git push" not in run_task
+    github_pr = (AGENTS / "dx" / "github_pr.py").read_text(encoding="utf-8")
+    assert '"push"' in github_pr
+    assert '"pr",\n                        "create"' in github_pr
+    assert "AGENT_TELEGRAM_" in github_pr
 
 
 def test_approval_is_local_terminal(

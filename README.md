@@ -6,8 +6,9 @@
 agentes de IA sem conceder ao agente executor autoridade unilateral sobre o
 estado canônico do repositório. A implementação atual usa **Cursor Agent** como
 executor e **Codex** como reviewer, combinando execução em worktree isolado,
-validação programática, revisão separada, aprovação vinculada ao conteúdo e
-integração Git local explicitamente acionada pelo operador.
+validação programática, revisão separada e aprovação vinculada ao conteúdo.
+Depois do aceite técnico, o profile escolhe entre integração local explícita ou
+publicação isolada em um pull request para revisão humana no GitHub.
 
 O projeto nasceu da automação de um workflow pessoal de desenvolvimento. Ele não
 foi originalmente desenhado como experimento acadêmico. A documentação de
@@ -40,10 +41,8 @@ reviewer separado (Codex, hoje)
      manifesto + hash revisado
               │
               ▼
-   verify / integrate explícito
-              │
-              ▼
-      branch local canônica
+       ┌─ verify / integrate explícito ─► branch local canônica
+       └─ github_pr ─► branch dedicada + PR ─► review humano
 ```
 
 A mudança candidata permanece fora da branch canônica durante execução e
@@ -51,10 +50,11 @@ review. Uma aprovação válida fica vinculada ao conteúdo revisado por manifes
 e hashes. O worktree em si **não é imutável**: drift posterior é detectado e
 bloqueia `verify`/`integrate`.
 
-`agent-loop integrate` é uma operação local e explícita: revalida o snapshot,
-constrói um commit a partir dos bytes vinculados ao manifesto usando um index
-temporário e avança a branch somente por fast-forward. O runtime não executa
-`fetch`, `pull`, `push`, criação de PR, deploy ou outra publicação remota.
+`agent-loop integrate` continua sendo uma operação local e explícita: revalida o
+snapshot, constrói um commit a partir dos bytes vinculados ao manifesto usando
+um index temporário e avança a branch somente por fast-forward. Somente o modo
+opt-in `github_pr` possui autoridade remota: ele publica exatamente o snapshot
+revisado em uma branch dedicada e abre um PR; não faz merge nem deploy.
 
 ## Estado atual
 
@@ -211,7 +211,7 @@ continua governado pela visão de controle congelada do commit-base, dentro das
 limitações documentadas em
 [`docs/PROJECT_PROFILE.md`](docs/PROJECT_PROFILE.md).
 
-## Notificação opcional
+## Aprovação e publicação
 
 O profile escolhe:
 
@@ -224,6 +224,20 @@ mode = "none"       # conclusão local
 O default de compatibilidade é `telegram`. A ponte é exclusivamente de saída e
 não decide integração. Configuração e unidade `systemd --user` estão descritas
 em [`docs/AGENT_ORCHESTRATION.md`](docs/AGENT_ORCHESTRATION.md).
+
+Para publicar automaticamente uma branch separada e abrir um PR não-draft:
+
+```toml
+[approval]
+mode = "github_pr"
+remote = "origin"
+base_branch = "main"
+```
+
+Esse modo exige `gh` autenticado, aceita somente remotes sem credenciais no
+`github.com`, não cria outbox nem chama a ponte Telegram e nunca faz merge. O
+perfil atualmente versionado continua em `telegram`; habilitar `github_pr` é
+uma escolha explícita por projeto.
 
 ## Estrutura
 

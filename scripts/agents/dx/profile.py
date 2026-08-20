@@ -17,7 +17,7 @@ PROFILE_RELATIVE_PATH = Path(".agent-loop/project.toml")
 PROFILE_SCHEMA_VERSION = 1
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SAFE_SECTIONS = {
-    "approval": {"mode"},
+    "approval": {"mode", "remote", "base_branch"},
     "bootstrap": {"command", "timeout_seconds"},
     "executor": {"timeout_seconds", "heartbeat_seconds"},
     "reviewer": {"timeout_seconds", "heartbeat_seconds"},
@@ -65,6 +65,8 @@ class ProfileError(ValueError):
 class ProjectProfile:
     path: Path | None = None
     approval_mode: str = "telegram"
+    approval_remote: str | None = None
+    approval_base_branch: str | None = None
     bootstrap_command: tuple[str, ...] | None = None
     bootstrap_timeout_seconds: int = 300
     executor_timeout_seconds: int = 1800
@@ -90,7 +92,11 @@ class ProjectProfile:
         return {
             "schema_version": PROFILE_SCHEMA_VERSION,
             "profile_path": str(self.path) if self.path else None,
-            "approval": {"mode": self.approval_mode},
+            "approval": {
+                "mode": self.approval_mode,
+                "remote": self.approval_remote,
+                "base_branch": self.approval_base_branch,
+            },
             "bootstrap": {
                 "command": list(self.bootstrap_command) if self.bootstrap_command else None,
                 "timeout_seconds": self.bootstrap_timeout_seconds,
@@ -202,6 +208,27 @@ def _template(value: Any, field: str, default: str, allowed: set[str]) -> str:
     return value
 
 
+def _git_name(value: Any, field: str, *, branch: bool = False) -> str:
+    if not isinstance(value, str) or not value or len(value) > 240 or "\x00" in value:
+        raise ProfileError(f"{field} must be a non-empty Git name")
+    allowed = r"[A-Za-z0-9._/-]+" if branch else r"[A-Za-z0-9._-]+"
+    segments = value.split("/")
+    forbidden = {" ", "~", "^", ":", "?", "*", "[", "\\"}
+    if (
+        re.fullmatch(allowed, value) is None
+        or value.startswith(("-", ".", "/"))
+        or value.endswith((".", "/"))
+        or ".." in value
+        or "@{" in value
+        or "//" in value
+        or any(character in value for character in forbidden)
+        or any(segment.endswith(".lock") for segment in segments)
+        or (not branch and "/" in value)
+    ):
+        raise ProfileError(f"{field} is not a safe Git name")
+    return value
+
+
 def parse_project_profile_text(text: str, *, path: Path | None = None) -> ProjectProfile:
     """Parse a project profile from TOML text without activating it."""
     try:
@@ -237,8 +264,41 @@ def _parse_project_profile_data(
     if configured_missing not in {"allow", "deny"}:
         raise ProfileError("policy.missing_profile must be 'allow' or 'deny'")
     approval_mode = approval.get("mode", "telegram")
-    if approval_mode not in {"none", "telegram"}:
-        raise ProfileError("approval.mode must be 'none' or 'telegram'")
+    if approval_mode not in {"none", "telegram", "github_pr"}:
+        raise ProfileError("approval.mode must be 'none', 'telegram', or 'github_pr'")
+    approval_remote = approval.get("remote")
+    approval_base_branch = approval.get("base_branch")
+    if approval_mode == "github_pr":
+        approval_remote = _git_name(
+            approval_remote, "approval.remote"
+        )
+        approval_base_branch = _git_name(
+            approval_base_branch, "approval.base_branch", branch=True
+        )
+    elif approval_remote is not None or approval_base_branch is not None:
+        raise ProfileError(
+            "approval.remote/base_branch are valid only for approval.mode='github_pr'"
+        )
+    required_environment = _string_list(
+        environment.get("required"), "environment.required", environment=True
+    )
+    if approval_mode == "github_pr":
+        forbidden_credentials = {
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "GITHUB_ENTERPRISE_TOKEN",
+        }
+        unsafe = [
+            name
+            for name in required_environment
+            if name.startswith("AGENT_TELEGRAM_") or name in forbidden_credentials
+        ]
+        if unsafe:
+            raise ProfileError(
+                "github_pr controller credentials cannot be exposed through "
+                f"environment.required: {', '.join(unsafe)}"
+            )
     documentation_required = documentation.get("required", False)
     if type(documentation_required) is not bool:
         raise ProfileError("documentation.required must be a boolean")
@@ -259,6 +319,8 @@ def _parse_project_profile_data(
     return ProjectProfile(
         path=path,
         approval_mode=approval_mode,
+        approval_remote=approval_remote,
+        approval_base_branch=approval_base_branch,
         bootstrap_command=_command(bootstrap.get("command"), "bootstrap.command", optional=True),
         bootstrap_timeout_seconds=_bounded_int(
             bootstrap.get("timeout_seconds"), "bootstrap.timeout_seconds", 300
@@ -276,9 +338,7 @@ def _parse_project_profile_data(
             reviewer.get("heartbeat_seconds"), "reviewer.heartbeat_seconds", 30, high=3600
         ),
         validation_commands=_commands(validation.get("commands"), "validation.commands"),
-        required_environment=_string_list(
-            environment.get("required"), "environment.required", environment=True
-        ),
+        required_environment=required_environment,
         executor_instructions=_string_list(instructions.get("executor"), "instructions.executor"),
         reviewer_instructions=_string_list(instructions.get("reviewer"), "instructions.reviewer"),
         documentation_required=documentation_required,
