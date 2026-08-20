@@ -41,7 +41,7 @@ from .control_adapter import (
     rewrite_frozen_entrypoint,
 )
 from .integration import IntegrationError, integrate_reviewed_snapshot
-from .github_pr import GitHubPullRequestError, publish_reviewed_pull_request
+from .github_branch import GitHubBranchError, publish_reviewed_branch
 from .paths import (
     PathConfigError,
     default_state_root,
@@ -241,11 +241,11 @@ def cmd_integrate_reviewed_snapshot(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_publish_reviewed_pull_request(args: argparse.Namespace) -> int:
-    """Publish an approved snapshot to its frozen GitHub PR destination."""
+def cmd_publish_reviewed_branch(args: argparse.Namespace) -> int:
+    """Publish an approved snapshot to its frozen GitHub branch destination."""
     try:
-        result = publish_reviewed_pull_request(Path(args.run_dir))
-    except (GitHubPullRequestError, OSError, ValueError) as exc:
+        result = publish_reviewed_branch(Path(args.run_dir))
+    except (GitHubBranchError, OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(result, indent=2, sort_keys=True))
@@ -849,11 +849,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_integrate_reviewed_snapshot)
 
     p = sub.add_parser(
-        "publish-reviewed-pr",
-        help="Publish a github_pr run to a reviewed branch and open its PR",
+        "publish-reviewed-branch",
+        aliases=["publish-reviewed-pr"],
+        help="Publish a github_branch run to its dedicated reviewed branch",
     )
     p.add_argument("--run-dir", required=True)
-    p.set_defaults(func=cmd_publish_reviewed_pull_request)
+    p.set_defaults(func=cmd_publish_reviewed_branch)
 
     p = sub.add_parser("serve", help="Send queued Telegram notifications")
     p.add_argument("--runs-root", default=None)
@@ -868,7 +869,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--missing-policy", choices=("allow", "deny"), default="allow")
     p.set_defaults(func=cmd_profile)
 
-    p = sub.add_parser("approval-mode", help="Print the configured notification mode")
+    p = sub.add_parser("approval-mode", help="Print the configured approval mode")
     p.add_argument("--repo", default=None)
     p.add_argument("--run-dir", default=None)
     p.add_argument("--worktree", default=None)

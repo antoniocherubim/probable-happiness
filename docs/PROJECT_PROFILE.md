@@ -25,9 +25,9 @@ validado com as mesmas regras e nunca relaxa o schema.
 | Campo | Tipo | Default/restrição |
 |---|---|---|
 | `schema_version` | inteiro | obrigatório, `1` |
-| `approval.mode` | `none`, `telegram` ou `github_pr` | `telegram` |
-| `approval.remote` | nome de remote Git seguro | obrigatório apenas em `github_pr` |
-| `approval.base_branch` | nome de branch Git seguro | obrigatório apenas em `github_pr` |
+| `approval.mode` | `none`, `telegram` ou `github_branch` | `telegram` |
+| `approval.remote` | nome de remote Git seguro | obrigatório apenas em `github_branch` |
+| `approval.base_branch` | nome de branch Git seguro | obrigatório apenas em `github_branch` |
 | `bootstrap.command` | array de strings | opcional |
 | `bootstrap.timeout_seconds` | inteiro | `300`, 1–86400 |
 | `executor.timeout_seconds` | inteiro | `1800`, 1–86400 |
@@ -98,7 +98,7 @@ comportamento, testes e riscos; o reviewer valida a precisão. Ausência bloquei
 o aceite técnico. O loop não edita documentação por heurística e não exige SHA ou
 URL de uma branch que ainda não existe.
 
-## Conclusão local, Telegram ou pull request
+## Conclusão local, Telegram ou branch remota
 
 Com `approval.mode = "none"`, um review técnico válido termina em `APPROVED`,
 sem outbox Telegram. Com `telegram`, também termina em `APPROVED` e enfileira
@@ -115,30 +115,31 @@ temporário e faz fast-forward com hooks desativados. Não há fetch, pull, push
 branch remota ou conexão Git. `agent-loop verify --run-dir ...` permanece como
 checagem somente-leitura.
 
-Com `github_pr`, o aceite técnico dispara um fluxo diferente:
+Com `github_branch`, o aceite técnico dispara um fluxo diferente:
 
 ```toml
 [approval]
-mode = "github_pr"
+mode = "github_branch"
 remote = "origin"
 base_branch = "main"
 ```
 
-O controller exige `gh auth status --hostname github.com`, valida que a URL de
-push do remote é um repositório `github.com` sem credenciais embutidas e exige
-que `refs/heads/<base_branch>` ainda aponte exatamente para o commit-base
-revisado. Em seguida ele recompõe o commit pelo manifesto, cria uma branch
-determinística `agent-loop/<task>/<run-id>`, faz push sem force e abre um PR
-não-draft com base/head explícitos. A branch canônica local não é movida e o
-merge permanece exclusivamente humano no GitHub.
+O controller usa apenas `git`, valida que a URL de push do remote é um
+repositório `github.com` sem credenciais embutidas e exige que
+`refs/heads/<base_branch>` ainda aponte exatamente para o commit-base revisado.
+Em seguida ele recompõe o commit pelo manifesto, cria uma branch determinística
+`agent-loop/<task>/<run-id>` e faz push sem force. A branch canônica local não é
+movida; abertura de PR e merge permanecem ações manuais.
 
 Esse modo é mutuamente exclusivo com Telegram: nenhum outbox é criado, a ponte
 ignora até um outbox plantado para o run e variáveis `AGENT_TELEGRAM_*` são
-removidas do ambiente do controller e de `git`/`gh`. Credenciais usuais de
+removidas do ambiente do controller e de `git`. Credenciais usuais de
 GitHub e Telegram também são recusadas em `environment.required`, para não serem
 entregues ao executor/reviewer. Falhas preservam o worktree e o registro
-progressivo `github_pull_request.json`; `agent-loop resume --run-dir ...` retoma
+progressivo `github_branch.json`; `agent-loop resume --run-dir ...` retoma
 idempotentemente a publicação. `agent-loop integrate` é recusado nesse modo.
+O nome `github_pr` e o registro antigo `github_pull_request.json` são aceitos
+somente para retomada compatível de profiles e runs anteriores.
 
 Profiles com uma tabela `[delivery]` são recusados; remova a tabela inteira.
 
@@ -301,8 +302,8 @@ técnico.
 - Adulteração deliberada do manifesto congelado e do metadata pelo mesmo UID
   continua fora do modelo de ameaça autenticado; hashes detectam drift e
   corrupção acidental.
-- Em `github_pr`, autenticação e políticas server-side continuam sob controle
-  de `gh`/GitHub; o runtime valida bindings locais, mas não substitui proteções
-  de branch nem a revisão humana.
+- Em `github_branch`, autenticação Git e políticas server-side continuam sob
+  controle do GitHub; o runtime valida bindings locais, mas não substitui
+  proteções de branch nem revisão humana.
 - `SIGKILL` aplicado ao próprio supervisor pode impedir sua gravação final; o
   próximo `resume` trata o artefato parcial como interrupção, nunca sucesso.

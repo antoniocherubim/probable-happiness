@@ -264,11 +264,14 @@ def _parse_project_profile_data(
     if configured_missing not in {"allow", "deny"}:
         raise ProfileError("policy.missing_profile must be 'allow' or 'deny'")
     approval_mode = approval.get("mode", "telegram")
-    if approval_mode not in {"none", "telegram", "github_pr"}:
-        raise ProfileError("approval.mode must be 'none', 'telegram', or 'github_pr'")
+    remote_modes = {"github_branch", "github_pr"}
+    if approval_mode not in {"none", "telegram", *remote_modes}:
+        raise ProfileError(
+            "approval.mode must be 'none', 'telegram', or 'github_branch'"
+        )
     approval_remote = approval.get("remote")
     approval_base_branch = approval.get("base_branch")
-    if approval_mode == "github_pr":
+    if approval_mode in remote_modes:
         approval_remote = _git_name(
             approval_remote, "approval.remote"
         )
@@ -277,12 +280,13 @@ def _parse_project_profile_data(
         )
     elif approval_remote is not None or approval_base_branch is not None:
         raise ProfileError(
-            "approval.remote/base_branch are valid only for approval.mode='github_pr'"
+            "approval.remote/base_branch are valid only for "
+            "approval.mode='github_branch'"
         )
     required_environment = _string_list(
         environment.get("required"), "environment.required", environment=True
     )
-    if approval_mode == "github_pr":
+    if approval_mode in remote_modes:
         forbidden_credentials = {
             "GH_TOKEN",
             "GITHUB_TOKEN",
@@ -296,7 +300,7 @@ def _parse_project_profile_data(
         ]
         if unsafe:
             raise ProfileError(
-                "github_pr controller credentials cannot be exposed through "
+                "github_branch controller credentials cannot be exposed through "
                 f"environment.required: {', '.join(unsafe)}"
             )
     documentation_required = documentation.get("required", False)

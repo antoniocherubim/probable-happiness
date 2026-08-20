@@ -152,16 +152,16 @@ finalize_reviewed_run() {
     note "technical APPROVED finalized; Telegram notification queued without actions"
     note "reviewed diff_hash=${reviewed_diff_hash}"
     note "no commit or push was attempted; integrate the preserved worktree manually"
-  elif [[ "$APPROVAL_MODE" == "github_pr" ]]; then
+  elif [[ "$APPROVAL_MODE" == "github_branch" || "$APPROVAL_MODE" == "github_pr" ]]; then
     note "technical APPROVED finalized; Telegram is disabled"
     note "reviewed diff_hash=${reviewed_diff_hash}"
-    if ! DX_CLI publish-reviewed-pr --run-dir "$RUN_DIR"; then
-      note "GitHub PR publication failed; reviewed worktree remains preserved"
+    if ! DX_CLI publish-reviewed-branch --run-dir "$RUN_DIR"; then
+      note "GitHub branch publication failed; reviewed worktree remains preserved"
       note "retry safely with: ./agent-loop resume --run-dir $RUN_DIR"
       exit 1
     fi
-    note "reviewed commit pushed to a dedicated branch and pull request opened"
-    note "human approval and merge remain on GitHub"
+    note "reviewed commit pushed to a dedicated GitHub branch"
+    note "opening a pull request and merging remain manual"
   else
     note "technical APPROVED finalized locally; Telegram is disabled"
     note "reviewed diff_hash=${reviewed_diff_hash}"
@@ -284,7 +284,7 @@ _run_task_entry() {
       --base-commit "$BASE_COMMIT" --missing-policy "$PROFILE_MISSING_POLICY")" || \
       die "invalid approval mode in base commit"
   fi
-  if [[ "$APPROVAL_MODE" == "github_pr" ]]; then
+  if [[ "$APPROVAL_MODE" == "github_branch" || "$APPROVAL_MODE" == "github_pr" ]]; then
     drop_telegram_environment
   fi
 
@@ -292,10 +292,10 @@ _run_task_entry() {
     DX_CLI verify-reviewed-snapshot --run-dir "$RUN_DIR" >/dev/null || \
       die "approved run no longer matches reviewed snapshot"
     note "run already approved and snapshot still matches"
-    if [[ "$APPROVAL_MODE" == "github_pr" ]]; then
-      DX_CLI publish-reviewed-pr --run-dir "$RUN_DIR" || \
-        die "GitHub PR publication failed; retry resume after correcting credentials or remote state"
-      note "GitHub pull request is published; human approval and merge remain on GitHub"
+    if [[ "$APPROVAL_MODE" == "github_branch" || "$APPROVAL_MODE" == "github_pr" ]]; then
+      DX_CLI publish-reviewed-branch --run-dir "$RUN_DIR" || \
+        die "GitHub branch publication failed; retry resume after correcting credentials or remote state"
+      note "reviewed commit is published on a dedicated GitHub branch"
     else
       note "integration remains manual"
     fi

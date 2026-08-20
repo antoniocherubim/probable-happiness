@@ -12,15 +12,15 @@ task versionada
   → APPROVED técnico vinculado ao conteúdo revisado
   ├─ approval.mode=none → conclusão local
   ├─ approval.mode=telegram → conclusão local + notificação terminal
-  └─ approval.mode=github_pr → commit/branch dedicados + push + PR
-     → review e merge humanos no GitHub
+  └─ approval.mode=github_branch → commit/branch dedicados + push
+     → abertura de PR e merge manuais, se desejados
 ```
 
 Não há automação de decisão de produto, criação de task, tag, merge, deploy,
 limpeza ou próxima task. `agent-loop integrate` automatiza somente a integração
-Git local quando explicitamente acionado. O modo opt-in `github_pr` é a única
-exceção remota: publica o snapshot tecnicamente aprovado em branch separada e
-abre o PR, sem aprová-lo nem fazer merge.
+Git local quando explicitamente acionado. O modo opt-in `github_branch` é a
+única exceção remota: publica o snapshot tecnicamente aprovado em branch
+separada, sem abrir PR nem fazer merge.
 
 A separação executor/reviewer é arquitetural; o runtime atual ainda está ligado
 a Cursor/Codex como implementações concretas. Veja
@@ -116,28 +116,22 @@ local. Checkout sujo, drift, base
 divergente, manifesto adulterado ou ausência de aprovação abortam sem alterar
 a branch. Nesse comando, nenhum remoto é consultado ou modificado.
 
-## Pull request no GitHub
+## Branch dedicada no GitHub
 
-Com `[approval] mode = "github_pr"`, `remote` e `base_branch` devem estar
+Com `[approval] mode = "github_branch"`, `remote` e `base_branch` devem estar
 explicitamente configurados. O run não conclui silenciosamente se a publicação
 falhar: permanece `APPROVED`, preserva o worktree e pode ser retomado com
 `agent-loop resume --run-dir ...`. A publicação é idempotente e não usa force.
 
-O preflight exige a GitHub CLI autenticada:
-
-```bash
-gh auth status --hostname github.com
-```
-
 Somente URLs HTTPS/SSH sem credenciais embutidas para `github.com` são aceitas.
 Antes de qualquer push, o controller confirma que a base remota ainda é o
 commit-base revisado. O commit é derivado do manifesto aprovado, a branch local
-canônica não se move e o PR é aberto como não-draft. Um humano decide review e
-merge no GitHub.
+canônica não se move e nenhum PR é aberto. Review e merge continuam manuais.
 
 Esse modo não carrega, cria ou envia mensagens Telegram. As variáveis
-`AGENT_TELEGRAM_*` são removidas dos processos Git/GitHub, e a ponte ignora runs
-congelados em `github_pr` mesmo que exista um arquivo de outbox plantado.
+`AGENT_TELEGRAM_*` são removidas dos processos Git, e a ponte ignora runs
+congelados em `github_branch` mesmo que exista um arquivo de outbox plantado.
+O nome `github_pr` continua aceito somente para compatibilidade com runs antigos.
 
 ## Telegram
 
@@ -234,7 +228,8 @@ liberação de escrita somente para o state root.
 
 A ponte registra somente a entrega da notificação. Ela não executa Git e não
 escreve no repositório. O `EnvironmentFile` coloca o token do bot somente nesse
-processo. A publicação `github_pr` ocorre no controller local e nunca na ponte.
+processo. A publicação `github_branch` ocorre no controller local e nunca na
+ponte.
 
 ## Estados e falhas
 
@@ -274,8 +269,8 @@ APPROVED
   ├─ mode=none     → verify opcional → integrate explícito/local
   ├─ mode=telegram → enfileira notificação sem ações
   │                   → verify opcional → integrate explícito/local
-  └─ mode=github_pr → branch dedicada + push sem force + PR não-draft
-                       → review/merge humanos no GitHub
+  └─ mode=github_branch → branch dedicada + push sem force
+                           → ações posteriores permanecem manuais
 
 CHANGES_REQUESTED em N = limite
   → BLOCKED/max_review_iterations
@@ -288,8 +283,8 @@ CHANGES_REQUESTED em N = limite
 FIFO/socket/device são recusados no snapshot; artefatos operacionais precisam
 estar ignorados. Nos modos locais, depois do aceite cabe ao operador decidir
 conscientemente entre descartar, inspecionar/`verify` ou executar
-`agent-loop integrate`. Em `github_pr`, o controller publica o commit revisado e
-o operador decide no PR se aprova e faz merge.
+`agent-loop integrate`. Em `github_branch`, o controller publica o commit
+revisado e o operador decide manualmente qualquer abertura de PR ou merge.
 
 ## Perfil, ambiente e retomada
 

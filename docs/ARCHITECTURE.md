@@ -57,11 +57,11 @@ CHANGES_REQUESTED   APPROVED
                         │
               ┌─────────┴─────────┐
               ▼                   ▼
-      verify + integrate       github_pr publish
+      verify + integrate     github_branch publish
           (explicit)          (dedicated branch)
               │                   │
               ▼                   ▼
-     local canonical branch    human-reviewed PR
+     local canonical branch   dedicated remote branch
 ```
 
 O runtime atual possui papéis distintos de executor e reviewer, mas ainda não
@@ -152,9 +152,9 @@ Por isso a terminologia correta é **content-bound approval** ou
 
 O comando **faz commit e fast-forward local quando explicitamente solicitado**.
 Nos modos `none` e `telegram`, não há publicação remota. No modo explícito
-`github_pr`, o controller reutiliza a construção segura do commit, mantém a
-branch canônica intacta, publica uma branch dedicada sem force e abre um PR
-não-draft. Merge, deploy e decisão humana permanecem fora do runtime.
+`github_branch`, o controller reutiliza a construção segura do commit, mantém a
+branch canônica intacta e publica uma branch dedicada sem force. Abertura de PR,
+merge, deploy e decisão humana permanecem fora do runtime.
 
 ## Máquina de estados
 
@@ -280,7 +280,7 @@ Operator
   configura o modo e decide explicitamente integrate ou review/merge do PR
 
 Remote repository
-  recebe somente branch/PR no modo github_pr; aplica suas próprias proteções
+  recebe somente a branch no modo github_branch; aplica suas próprias proteções
 ```
 
 ### Modelo de confiança
@@ -304,8 +304,8 @@ não bloqueia clientes HTTP genéricos.
 | Aprovação vinculada ao conteúdo revisado | Implementado |
 | Drift pós-review detectado antes da integração | Implementado |
 | Integração local explícita e sem Git remoto | Implementado |
-| Branch dedicada + PR sem merge no modo `github_pr` | Implementado |
-| Exclusão de comunicação Telegram no modo `github_pr` | Implementado |
+| Branch dedicada sem PR ou merge no modo `github_branch` | Implementado |
+| Exclusão de comunicação Telegram no modo `github_branch` | Implementado |
 | Adapter de controle congelado para self-hosting/profile evolution | Implementado em `SELF-00P` |
 | Provenance exata da versão do engine em todo run | Planejado |
 | Fail-closed geral ao retomar run com engine diferente | Planejado |

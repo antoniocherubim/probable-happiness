@@ -486,9 +486,12 @@ def integrate_reviewed_snapshot(
             )
         profile = metadata.get("profile")
         approval = profile.get("approval") if isinstance(profile, dict) else None
-        if isinstance(approval, dict) and approval.get("mode") == "github_pr":
+        if isinstance(approval, dict) and approval.get("mode") in {
+            "github_branch",
+            "github_pr",
+        }:
             raise IntegrationError(
-                "manual integration is disabled for github_pr approval mode"
+                "manual integration is disabled for remote branch approval mode"
             )
 
         repo = Path(str(metadata["repo"])).resolve()

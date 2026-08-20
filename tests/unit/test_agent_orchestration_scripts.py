@@ -588,17 +588,17 @@ def test_finalize_reviewed_run_queues_notification_without_human_gate(
     assert not (run_dir / "human_approval_decision.json").exists()
 
 
-def test_finalize_reviewed_run_publishes_github_pr_without_telegram(
+def test_finalize_reviewed_run_publishes_github_branch_without_telegram(
     tmp_path: Path,
 ) -> None:
-    run_dir = tmp_path / "runs" / "github-pr"
+    run_dir = tmp_path / "runs" / "github-branch"
     worktree = tmp_path / "worktree"
     run_dir.mkdir(parents=True)
     worktree.mkdir()
     review = run_dir / "review-1.json"
     review.write_text('{"status":"APPROVED"}\n', encoding="utf-8")
     command_log = tmp_path / "commands.log"
-    fake_dx = tmp_path / "fake_dx_github_pr.sh"
+    fake_dx = tmp_path / "fake_dx_github_branch.sh"
     fake_dx.write_text(
         textwrap.dedent(
             f"""\
@@ -620,11 +620,11 @@ def test_finalize_reviewed_run_publishes_github_pr_without_telegram(
               verify-reviewed-snapshot)
                 exit 0
                 ;;
-              publish-reviewed-pr)
-                printf '%s\\n' '{{"result":"pull_request_opened"}}'
+              publish-reviewed-branch)
+                printf '%s\\n' '{{"result":"branch_published"}}'
                 ;;
               notify-*)
-                echo "Telegram command forbidden in github_pr mode" >&2
+                echo "Telegram command forbidden in github_branch mode" >&2
                 exit 98
                 ;;
               *)
@@ -647,7 +647,7 @@ def test_finalize_reviewed_run_publishes_github_pr_without_telegram(
         BASE_COMMIT='deadbeef'
         TASK_FILE='docs/tasks/PR-01.md'
         TASK_ID='PR-01'
-        APPROVAL_MODE='github_pr'
+        APPROVAL_MODE='github_branch'
         source {str(AGENTS / "run_task.sh")!r}
         finalize_reviewed_run {str(review)!r} {reviewed_hash!r}
         """
@@ -662,16 +662,16 @@ def test_finalize_reviewed_run_publishes_github_pr_without_telegram(
     )
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "human approval and merge remain on GitHub" in completed.stdout
+    assert "opening a pull request and merging remain manual" in completed.stdout
     assert command_log.read_text(encoding="utf-8").splitlines() == [
         "transition-state",
         "verify-reviewed-snapshot",
-        "publish-reviewed-pr",
+        "publish-reviewed-branch",
     ]
     assert not (run_dir / "telegram_notify.json").exists()
 
 
-def test_github_pr_failures_do_not_enqueue_telegram(tmp_path: Path) -> None:
+def test_github_branch_failures_do_not_enqueue_telegram(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     command_log = tmp_path / "commands.log"
@@ -692,7 +692,7 @@ def test_github_pr_failures_do_not_enqueue_telegram(tmp_path: Path) -> None:
         set -euo pipefail
         AGENT_DX_CLI={str(fake_dx)!r}
         RUN_DIR={str(run_dir)!r}
-        APPROVAL_MODE='github_pr'
+        APPROVAL_MODE='github_branch'
         source {str(AGENTS / "run_task.sh")!r}
         notify_terminal_failure 'must remain local' '' failure
         """

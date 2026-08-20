@@ -8,7 +8,7 @@ estado canônico do repositório. A implementação atual usa **Cursor Agent** c
 executor e **Codex** como reviewer, combinando execução em worktree isolado,
 validação programática, revisão separada e aprovação vinculada ao conteúdo.
 Depois do aceite técnico, o profile escolhe entre integração local explícita ou
-publicação isolada em um pull request para revisão humana no GitHub.
+publicação isolada em uma branch dedicada no GitHub.
 
 O projeto nasceu da automação de um workflow pessoal de desenvolvimento. Ele não
 foi originalmente desenhado como experimento acadêmico. A documentação de
@@ -42,7 +42,7 @@ reviewer separado (Codex, hoje)
               │
               ▼
        ┌─ verify / integrate explícito ─► branch local canônica
-       └─ github_pr ─► branch dedicada + PR ─► review humano
+       └─ github_branch ─► branch dedicada ─► fluxo remoto manual
 ```
 
 A mudança candidata permanece fora da branch canônica durante execução e
@@ -53,8 +53,8 @@ bloqueia `verify`/`integrate`.
 `agent-loop integrate` continua sendo uma operação local e explícita: revalida o
 snapshot, constrói um commit a partir dos bytes vinculados ao manifesto usando
 um index temporário e avança a branch somente por fast-forward. Somente o modo
-opt-in `github_pr` possui autoridade remota: ele publica exatamente o snapshot
-revisado em uma branch dedicada e abre um PR; não faz merge nem deploy.
+opt-in `github_branch` possui autoridade remota: ele publica exatamente o
+snapshot revisado em uma branch dedicada; não abre PR, não faz merge nem deploy.
 
 ## Estado atual
 
@@ -225,19 +225,20 @@ O default de compatibilidade é `telegram`. A ponte é exclusivamente de saída 
 não decide integração. Configuração e unidade `systemd --user` estão descritas
 em [`docs/AGENT_ORCHESTRATION.md`](docs/AGENT_ORCHESTRATION.md).
 
-Para publicar automaticamente uma branch separada e abrir um PR não-draft:
+Para publicar automaticamente uma branch separada:
 
 ```toml
 [approval]
-mode = "github_pr"
+mode = "github_branch"
 remote = "origin"
 base_branch = "main"
 ```
 
-Esse modo exige `gh` autenticado, aceita somente remotes sem credenciais no
-`github.com`, não cria outbox nem chama a ponte Telegram e nunca faz merge. O
-perfil atualmente versionado continua em `telegram`; habilitar `github_pr` é
-uma escolha explícita por projeto.
+Esse modo usa apenas `git`, aceita somente remotes sem credenciais no
+`github.com`, não cria outbox nem chama a ponte Telegram e não abre PR nem faz
+merge. O perfil atualmente versionado continua em `telegram`; habilitar
+`github_branch` é uma escolha explícita por projeto. O nome `github_pr` continua
+aceito somente para compatibilidade com profiles e runs anteriores.
 
 ## Estrutura
 
