@@ -505,13 +505,19 @@ def prepare_review_artifacts(
 
 def format_technical_summary(summary: dict[str, Any]) -> str:
     counts = summary.get("test_counts") or {}
+    iteration_limit = summary.get("max_iterations")
+    iteration_text = (
+        f"{summary.get('iteration')}/unlimited"
+        if iteration_limit == 2_147_483_647
+        else f"{summary.get('iteration')}/{iteration_limit}"
+    )
     lines = [
         f"{summary.get('task_id')} — {summary.get('task_title')}",
         "",
         f"Repositório: {summary.get('repository')}",
         f"Base: {str(summary.get('base_commit'))[:12]}",
         f"Resultado técnico: {summary.get('reviewer_status')}",
-        f"Iteração: {summary.get('iteration')}/{summary.get('max_iterations')}",
+        f"Iteração: {iteration_text}",
         f"Arquivos: {summary.get('file_count')}",
         f"Diff: +{summary.get('additions')} / -{summary.get('deletions')}",
         (

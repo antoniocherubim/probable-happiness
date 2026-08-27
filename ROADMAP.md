@@ -93,8 +93,9 @@ SELF-00P → SELF-00A → PROV-01A → PROV-01B → SELF-01A
 - Em self-hosting, o candidate runtime nunca substitui o controller do run que
   o produz.
 - Uma dependência só é considerada disponível para a próxima task depois de
-  `APPROVED` **e integração explícita ao estado canônico**; aprovação isolada no
-  worktree não satisfaz `depends_on`.
+  `APPROVED` **e integração ao estado canônico**; aprovação isolada no worktree
+  não satisfaz `depends_on`. Essa integração é explícita nos modos comuns e
+  automática somente no modo local opt-in `yolo`.
 - Mudanças no runtime devem preservar o contrato usado por consumidores externos
   existentes; checks de compatibilidade não devem exigir modificar o
   `artang-platform`.

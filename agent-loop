@@ -15,6 +15,7 @@ usage() {
   printf '%s\n' \
     "Usage:" \
     "  agent-loop run --repo <path> [--state-root <path>] [--env-file <path>] [--require-profile] [--allow-candidate-profile] <task-file> [max-iterations] [base-ref]" \
+    "  agent-loop yolo --repo <path> [--state-root <path>] [--env-file <path>] [--base-ref <ref>] <task-file> [<task-file> ...]" \
     "  agent-loop review --repo <path> [--state-root <path>] [review options] <task-file>" \
     "  agent-loop resume --run-dir <path> [--review-only] [--additional-iterations <n>] [--env-file <path>]" \
     "  agent-loop evidence --run-dir <path> --file <report>" \
@@ -94,6 +95,11 @@ shift
 case "$COMMAND" in
   run|review)
     run_or_review "$COMMAND" "$@"
+    ;;
+  yolo)
+    export AGENT_LOOP_TOOL_ROOT="$TOOL_ROOT"
+    export AGENT_LOOP_PYTHON="$PYTHON_BIN"
+    exec bash "$TOOL_ROOT/scripts/agents/run_yolo.sh" "$@"
     ;;
   serve)
     STATE_ROOT=""

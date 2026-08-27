@@ -406,7 +406,7 @@ def _frozen_approval_mode(run_dir: Path) -> str:
         return "telegram"
     approval = profile.get("approval") if isinstance(profile, dict) else None
     mode = approval.get("mode") if isinstance(approval, dict) else None
-    if mode not in {"none", "telegram", "github_branch", "github_pr"}:
+    if mode not in {"none", "telegram", "yolo", "github_branch", "github_pr"}:
         raise ApprovalError("frozen approval mode is missing or invalid")
     return str(mode)
 
@@ -661,7 +661,7 @@ def verify_reviewed_snapshot(run_dir: Path) -> dict[str, Any]:
         profile = metadata.get("profile") if isinstance(metadata, dict) else None
         approval = profile.get("approval") if isinstance(profile, dict) else None
         mode = approval.get("mode") if isinstance(approval, dict) else None
-        if mode not in {"none", "telegram", "github_branch", "github_pr"}:
+        if mode not in {"none", "telegram", "yolo", "github_branch", "github_pr"}:
             raise ApprovalError("terminal technical APPROVED has invalid approval mode")
         manifest_path = run_dir / "reviewed_manifest.json"
         try:

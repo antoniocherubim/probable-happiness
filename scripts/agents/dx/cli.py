@@ -453,6 +453,64 @@ def cmd_supervise(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_yolo_final_review(args: argparse.Namespace) -> int:
+    """Run the terminal cumulative reviewer without an executor callback."""
+    command = list(args.command)
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        print("ERROR: final reviewer command is required", file=sys.stderr)
+        return 2
+    try:
+        repo = Path(args.repo).expanduser().resolve()
+        run_dir = Path(args.run_dir).expanduser().resolve()
+        profile = load_project_profile_from_git(
+            repo,
+            args.end_commit,
+            missing_policy="deny",
+        )
+        if profile.approval_mode != "yolo":
+            raise ProfileError("final review requires approval.mode='yolo'")
+        environment_profile = dataclasses.replace(
+            profile,
+            required_environment=(),
+        )
+        environment, _diagnostics = build_authorized_environment(
+            environment_profile,
+            None,
+            context={
+                "AGENT_LOOP_TARGET_REPO": str(repo),
+                "AGENT_LOOP_WORKTREE": str(repo),
+                "AGENT_LOOP_RUN_DIR": str(run_dir),
+                "AGENT_LOOP_TASK_FILE": "",
+                "AGENT_LOOP_BASE_COMMIT": args.start_commit,
+            },
+        )
+        environment["GIT_ALLOW_PROTOCOL"] = "file"
+        environment["GIT_PROTOCOL_FROM_USER"] = "0"
+        return supervise_command(
+            command=command,
+            phase="final-review",
+            iteration=0,
+            cwd=repo,
+            run_dir=run_dir,
+            environment=environment,
+            secret_values={},
+            timeout_seconds=profile.reviewer_timeout_seconds,
+            heartbeat_seconds=profile.reviewer_heartbeat_seconds,
+            terminate_grace_seconds=profile.terminate_grace_seconds,
+            max_output_bytes=profile.output_limit_bytes,
+            max_file_bytes=profile.file_limit_bytes,
+            max_run_files=profile.run_file_limit,
+            memory_limit_bytes=profile.memory_limit_bytes,
+            task_limit=profile.task_limit,
+            sanitize_artifacts=[Path(args.report)],
+        )
+    except (OSError, ProfileError, SystemdScopeError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
 def cmd_init_run(args: argparse.Namespace) -> int:
     try:
         capture = capture_control_adapter(
@@ -908,6 +966,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--artifact", action="append", default=[])
     p.add_argument("command", nargs=argparse.REMAINDER)
     p.set_defaults(func=cmd_supervise)
+
+    p = sub.add_parser("yolo-final-review", help=argparse.SUPPRESS)
+    p.add_argument("--repo", required=True)
+    p.add_argument("--run-dir", required=True)
+    p.add_argument("--start-commit", required=True)
+    p.add_argument("--end-commit", required=True)
+    p.add_argument("--report", required=True)
+    p.add_argument("command", nargs=argparse.REMAINDER)
+    p.set_defaults(func=cmd_yolo_final_review)
 
     p = sub.add_parser("init-run", help="Write immutable resume metadata")
     p.add_argument("--run-dir", required=True)

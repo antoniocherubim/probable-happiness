@@ -151,7 +151,9 @@ Por isso a terminologia correta é **content-bound approval** ou
 8. avança apenas por fast-forward local.
 
 O comando **faz commit e fast-forward local quando explicitamente solicitado**.
-Nos modos `none` e `telegram`, não há publicação remota. No modo explícito
+Nos modos `none` e `telegram`, não há publicação remota. O modo `yolo` concede
+essa mesma autoridade local ao encadeador, uma task aprovada por vez, e nunca
+concede autoridade remota. No modo explícito
 `github_branch`, o controller reutiliza a construção segura do commit, mantém a
 branch canônica intacta e publica uma branch dedicada sem force. Abertura de PR,
 merge, deploy e decisão humana permanecem fora do runtime.
@@ -304,6 +306,8 @@ não bloqueia clientes HTTP genéricos.
 | Aprovação vinculada ao conteúdo revisado | Implementado |
 | Drift pós-review detectado antes da integração | Implementado |
 | Integração local explícita e sem Git remoto | Implementado |
+| Encadeamento YOLO local, linear e sem limite numérico de reviews | Implementado em `YOLO-01` |
+| Review cumulativo final em Markdown sem retorno ao executor | Implementado em `YOLO-01` |
 | Branch dedicada sem PR ou merge no modo `github_branch` | Implementado |
 | Exclusão de comunicação Telegram no modo `github_branch` | Implementado |
 | Adapter de controle congelado para self-hosting/profile evolution | Implementado em `SELF-00P` |

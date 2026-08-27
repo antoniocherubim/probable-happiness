@@ -3,6 +3,7 @@ set -euo pipefail
 
 AGENT_LOOP_SCRIPT_TOOL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 source "$AGENT_LOOP_SCRIPT_TOOL_ROOT/scripts/agents/codex_bin.sh"
+UNBOUNDED_ITERATIONS=2147483647
 
 usage() {
   printf '%s\n' \
@@ -141,7 +142,15 @@ finalize_reviewed_run() {
   DX_CLI verify-reviewed-snapshot --run-dir "$RUN_DIR" >/dev/null || \
     die "terminal reviewed snapshot verification failed"
 
-  if [[ "$APPROVAL_MODE" == "telegram" ]]; then
+  if [[ "$APPROVAL_MODE" == "yolo" ]]; then
+    note "technical APPROVED finalized; YOLO local integration starting"
+    note "reviewed diff_hash=${reviewed_diff_hash}"
+    if ! DX_CLI integrate-reviewed-snapshot --run-dir "$RUN_DIR"; then
+      note "YOLO integration failed; reviewed worktree remains preserved"
+      exit 1
+    fi
+    note "YOLO task committed locally; no push or task branch was attempted"
+  elif [[ "$APPROVAL_MODE" == "telegram" ]]; then
     if ! DX_CLI notify-approved \
       --run-dir "$RUN_DIR" \
       --task-id "$task_id" \
@@ -199,6 +208,22 @@ compute_reviewed_snapshot_hash() {
   local checkout="$1"
   local base_commit="$2"
   DX_CLI compute-diff-hash --worktree "$checkout" --base-commit "$base_commit"
+}
+
+agent_tokens_exhausted() {
+  local phase="$1"
+  local phase_iteration="$2"
+  local candidate=""
+  local pattern='(token|context|usage)[[:space:]_-]*(budget|window|length|limit|quota)?[^[:cntrl:]]{0,80}(exhausted|exceeded|reached|used[[:space:]]*up|full|try[[:space:]]+again|reset)|((maximum|max)[[:space:]_-]*)?(token|context)[[:space:]_-]*(budget|window|length|limit|quota)[^[:cntrl:]]{0,40}(exhausted|exceeded|reached|full)|(hit|reached|exceeded)[^[:cntrl:]]{0,40}(token|context|usage)[[:space:]_-]*(budget|window|length|limit|quota)|out[[:space:]]+of[^[:cntrl:]]{0,20}tokens|0[^[:cntrl:]]{0,20}tokens[^[:cntrl:]]{0,20}left'
+  for candidate in \
+    "$RUN_DIR/${phase}-${phase_iteration}.log" \
+    "$RUN_DIR/cursor-${phase_iteration}.json" \
+    "$RUN_DIR/.review-${phase_iteration}.candidate.$$.json"; do
+    if [[ -f "$candidate" ]] && grep -Eqi "$pattern" "$candidate"; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 _run_task_entry() {
@@ -284,6 +309,9 @@ _run_task_entry() {
       --base-commit "$BASE_COMMIT" --missing-policy "$PROFILE_MISSING_POLICY")" || \
       die "invalid approval mode in base commit"
   fi
+  if [[ "$APPROVAL_MODE" == "yolo" ]]; then
+    MAX_ITERATIONS="$UNBOUNDED_ITERATIONS"
+  fi
   if [[ "$APPROVAL_MODE" == "github_branch" || "$APPROVAL_MODE" == "github_pr" ]]; then
     drop_telegram_environment
   fi
@@ -297,7 +325,13 @@ _run_task_entry() {
         die "GitHub branch publication failed; retry resume after correcting credentials or remote state"
       note "reviewed commit is published on a dedicated GitHub branch"
     else
-      note "integration remains manual"
+      if [[ "$APPROVAL_MODE" == "yolo" ]]; then
+        DX_CLI integrate-reviewed-snapshot --run-dir "$RUN_DIR" || \
+          die "YOLO local integration failed"
+        note "YOLO task is committed locally"
+      else
+        note "integration remains manual"
+      fi
     fi
     exit 0
   fi
@@ -357,7 +391,11 @@ _run_task_entry() {
     note "dry-run only; no worktree or agent will be started"
     note "task=$TASK_FILE"
     note "base=$BASE_COMMIT"
-    note "max_iterations=$MAX_ITERATIONS"
+    if [[ "$APPROVAL_MODE" == "yolo" ]]; then
+      note "max_iterations=unlimited"
+    else
+      note "max_iterations=$MAX_ITERATIONS"
+    fi
     note "cursor_agent=$CURSOR_AGENT_BIN authenticated=$CURSOR_AUTHENTICATED"
     note "codex=$CODEX_BIN authenticated=$CODEX_AUTHENTICATED"
     note "tool_root=$TOOL_ROOT"
@@ -444,7 +482,11 @@ _run_task_entry() {
     EXECUTOR_REPORT="$RUN_DIR/cursor-${iteration}.json"
     if [[ "$START_PHASE" == "executor" ]]; then
       CURRENT_PHASE="executor"
-      note "iteration $iteration/$MAX_ITERATIONS: Cursor executing"
+      if [[ "$APPROVAL_MODE" == "yolo" ]]; then
+        note "iteration $iteration/unlimited: Cursor executing"
+      else
+        note "iteration $iteration/$MAX_ITERATIONS: Cursor executing"
+      fi
       transition_run_state "executor_started"
 
     EXECUTOR_PROMPT="You are the executor for task $TASK_ID. Work only inside this isolated worktree. Read $TASK_FILE completely and implement it. Preserve the task's exclusions. Run the required tests that are available. Read .agent-loop/project.toml and update every document required by [documentation], including roadmap/status when configured. Required documentation must accurately record behavior, test evidence, and residual risks. Do not declare completion without test evidence. Do not insert a commit hash or branch URL that does not exist yet. Do not commit, push, merge, deploy, or access secrets. Finish with an exact summary of files changed, documents changed, and tests passed, failed, or skipped."
@@ -465,7 +507,8 @@ _run_task_entry() {
     CURSOR_EXIT=$?
     set -e
       if [[ "$CURSOR_EXIT" -ne 0 || ! -s "$EXECUTOR_REPORT" ]]; then
-        if [[ "$CURSOR_EXIT" -eq 124 ]]; then CURSOR_REASON="executor_timeout"; \
+        if agent_tokens_exhausted executor "$iteration"; then CURSOR_REASON="executor_token_exhausted"; \
+        elif [[ "$CURSOR_EXIT" -eq 124 ]]; then CURSOR_REASON="executor_timeout"; \
         elif [[ "$CURSOR_EXIT" -eq 125 ]]; then CURSOR_REASON="executor_resource_limit"; \
         elif [[ ! -s "$EXECUTOR_REPORT" ]]; then CURSOR_REASON="executor_empty_report"; \
         else CURSOR_REASON="executor_failed"; fi
@@ -520,7 +563,11 @@ _run_task_entry() {
     fi
 
     CURRENT_PHASE="reviewer"
-    note "iteration $iteration/$MAX_ITERATIONS: Codex reviewing"
+    if [[ "$APPROVAL_MODE" == "yolo" ]]; then
+      note "iteration $iteration/unlimited: Codex reviewing"
+    else
+      note "iteration $iteration/$MAX_ITERATIONS: Codex reviewing"
+    fi
     transition_run_state "review_started"
     REVIEW_FILE="$RUN_DIR/review-${iteration}.json"
     REVIEW_CANDIDATE="$RUN_DIR/.review-${iteration}.candidate.$$.json"
@@ -560,7 +607,8 @@ _run_task_entry() {
     CODEX_EXIT=$?
     set -e
     if [[ "$CODEX_EXIT" -ne 0 || ! -s "$REVIEW_CANDIDATE" ]]; then
-      if [[ "$CODEX_EXIT" -eq 124 ]]; then CODEX_REASON="reviewer_timeout"; \
+      if agent_tokens_exhausted reviewer "$iteration"; then CODEX_REASON="reviewer_token_exhausted"; \
+      elif [[ "$CODEX_EXIT" -eq 124 ]]; then CODEX_REASON="reviewer_timeout"; \
       elif [[ "$CODEX_EXIT" -eq 125 ]]; then CODEX_REASON="reviewer_resource_limit"; \
       elif [[ "$CODEX_EXIT" -ne 0 ]]; then CODEX_REASON="reviewer_failed"; \
       else CODEX_REASON="reviewer_empty_report"; fi

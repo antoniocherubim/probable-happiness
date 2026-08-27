@@ -265,9 +265,9 @@ def _parse_project_profile_data(
         raise ProfileError("policy.missing_profile must be 'allow' or 'deny'")
     approval_mode = approval.get("mode", "telegram")
     remote_modes = {"github_branch", "github_pr"}
-    if approval_mode not in {"none", "telegram", *remote_modes}:
+    if approval_mode not in {"none", "telegram", "yolo", *remote_modes}:
         raise ProfileError(
-            "approval.mode must be 'none', 'telegram', or 'github_branch'"
+            "approval.mode must be 'none', 'telegram', 'yolo', or 'github_branch'"
         )
     approval_remote = approval.get("remote")
     approval_base_branch = approval.get("base_branch")

@@ -25,7 +25,7 @@ validado com as mesmas regras e nunca relaxa o schema.
 | Campo | Tipo | Default/restrição |
 |---|---|---|
 | `schema_version` | inteiro | obrigatório, `1` |
-| `approval.mode` | `none`, `telegram` ou `github_branch` | `telegram` |
+| `approval.mode` | `none`, `telegram`, `yolo` ou `github_branch` | `telegram` |
 | `approval.remote` | nome de remote Git seguro | obrigatório apenas em `github_branch` |
 | `approval.base_branch` | nome de branch Git seguro | obrigatório apenas em `github_branch` |
 | `bootstrap.command` | array de strings | opcional |
@@ -98,7 +98,7 @@ comportamento, testes e riscos; o reviewer valida a precisão. Ausência bloquei
 o aceite técnico. O loop não edita documentação por heurística e não exige SHA ou
 URL de uma branch que ainda não existe.
 
-## Conclusão local, Telegram ou branch remota
+## Conclusão local, YOLO, Telegram ou branch remota
 
 Com `approval.mode = "none"`, um review técnico válido termina em `APPROVED`,
 sem outbox Telegram. Com `telegram`, também termina em `APPROVED` e enfileira
@@ -114,6 +114,18 @@ checkout limpo e `HEAD` no commit-base; então cria um commit pelo index
 temporário e faz fast-forward com hooks desativados. Não há fetch, pull, push,
 branch remota ou conexão Git. `agent-loop verify --run-dir ...` permanece como
 checagem somente-leitura.
+
+Com `approval.mode = "yolo"`, o comando `agent-loop yolo` exige uma lista
+explícita de tasks já rastreadas e executa cada run com limite lógico
+`unlimited`. Esse valor é persistido como sentinela defensiva no metadata; não
+autoriza retry de timeout, resource limit, falha de agente, `BLOCKED` ou
+esgotamento de tokens/contexto. Somente `CHANGES_REQUESTED` abre outra iteração.
+
+O aceite chama o mesmo integrador content-bound, cria um commit local e faz
+fast-forward da branch já selecionada. O encadeador confirma checkout limpo,
+avanço linear de exatamente um commit e ausência de remoto antes de iniciar a
+task seguinte. Depois da lista, uma fase reviewer-only gera um Markdown externo;
+ela não possui aresta de retorno ao executor.
 
 Com `github_branch`, o aceite técnico dispara um fluxo diferente:
 

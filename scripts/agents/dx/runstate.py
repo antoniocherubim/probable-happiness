@@ -37,6 +37,7 @@ ITERATION_BUDGET_FIELD = "iteration_budget"
 ITERATION_BUDGET_SCHEMA_VERSION = 1
 MAX_ADDITIONAL_ITERATIONS = 20
 MAX_EFFECTIVE_ITERATIONS = 50
+UNBOUNDED_ITERATIONS = 2_147_483_647
 MAX_REVIEW_REASON = "max_review_iterations"
 LEGACY_MAX_REVIEW_REASON = "max_iterations"
 
@@ -95,7 +96,17 @@ def validate_run(run_dir: Path) -> dict[str, Any]:
     task = str(metadata.get("task_file", ""))
     base = str(metadata.get("base_commit", ""))
     max_iterations = metadata.get("max_iterations")
-    if type(max_iterations) is not int or not 1 <= max_iterations <= 5:
+    profile = metadata.get("profile")
+    approval = profile.get("approval") if isinstance(profile, dict) else None
+    yolo = isinstance(approval, dict) and approval.get("mode") == "yolo"
+    valid_limit = (
+        type(max_iterations) is int
+        and (
+            1 <= max_iterations <= 5
+            or (yolo and max_iterations == UNBOUNDED_ITERATIONS)
+        )
+    )
+    if not valid_limit:
         raise RunStateError("invalid max_iterations in run metadata")
     if not repo.is_dir() or not worktree.is_dir() or worktree.is_symlink():
         raise RunStateError("repository or worktree is missing")
@@ -593,7 +604,7 @@ def plan_resume(run_dir: Path, *, review_only: bool = False) -> dict[str, Any]:
         approval = profile.get("approval") if isinstance(profile, dict) else None
         if (
             isinstance(approval, dict)
-            and approval.get("mode") in {"none", "telegram"}
+            and approval.get("mode") in {"none", "telegram", "yolo"}
         ):
             verification = verify_reviewed_snapshot(run_dir)
             if not verification["matches"]:

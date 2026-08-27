@@ -7,8 +7,8 @@ agentes de IA sem conceder ao agente executor autoridade unilateral sobre o
 estado canônico do repositório. A implementação atual usa **Cursor Agent** como
 executor e **Codex** como reviewer, combinando execução em worktree isolado,
 validação programática, revisão separada e aprovação vinculada ao conteúdo.
-Depois do aceite técnico, o profile escolhe entre integração local explícita ou
-publicação isolada em uma branch dedicada no GitHub.
+Depois do aceite técnico, o profile escolhe entre integração local explícita,
+encadeamento local YOLO ou publicação isolada em uma branch dedicada no GitHub.
 
 O projeto nasceu da automação de um workflow pessoal de desenvolvimento. Ele não
 foi originalmente desenhado como experimento acadêmico. A documentação de
@@ -41,7 +41,8 @@ reviewer separado (Codex, hoje)
      manifesto + hash revisado
               │
               ▼
-       ┌─ verify / integrate explícito ─► branch local canônica
+       ├─ verify / integrate explícito ─► branch local canônica
+       ├─ yolo ─► commit local ─► próxima task ─► review final .md
        └─ github_branch ─► branch dedicada ─► fluxo remoto manual
 ```
 
@@ -50,9 +51,12 @@ review. Uma aprovação válida fica vinculada ao conteúdo revisado por manifes
 e hashes. O worktree em si **não é imutável**: drift posterior é detectado e
 bloqueia `verify`/`integrate`.
 
-`agent-loop integrate` continua sendo uma operação local e explícita: revalida o
+`agent-loop integrate` continua sendo uma operação local e explícita nos modos
+`none` e `telegram`: revalida o
 snapshot, constrói um commit a partir dos bytes vinculados ao manifesto usando
-um index temporário e avança a branch somente por fast-forward. Somente o modo
+um index temporário e avança a branch somente por fast-forward. O modo opt-in
+`yolo` reutiliza esse mesmo integrador automaticamente para uma lista explícita
+de tasks, sem limite numérico de iterações e sem acesso remoto. Somente o modo
 opt-in `github_branch` possui autoridade remota: ele publica exatamente o
 snapshot revisado em uma branch dedicada; não abre PR, não faz merge nem deploy.
 
@@ -167,6 +171,8 @@ Cursor Agent e Codex CLI autenticados.
 
 ```bash
 ./agent-loop run --repo /caminho/do/projeto docs/tasks/TASK-01.md 3 main
+./agent-loop yolo --repo /caminho/do/projeto \
+  docs/tasks/TASK-01.md docs/tasks/TASK-02.md
 ./agent-loop run --repo /caminho/do/projeto --allow-candidate-profile \
   docs/tasks/SELF-00A.md 3 main
 ./agent-loop review --repo /caminho/do/projeto docs/tasks/TASK-01.md
@@ -219,11 +225,19 @@ O profile escolhe:
 [approval]
 mode = "none"       # conclusão local
 # mode = "telegram" # conclusão local + notificação terminal
+# mode = "yolo"     # commits locais encadeados + review final
 ```
 
 O default de compatibilidade é `telegram`. A ponte é exclusivamente de saída e
 não decide integração. Configuração e unidade `systemd --user` estão descritas
 em [`docs/AGENT_ORCHESTRATION.md`](docs/AGENT_ORCHESTRATION.md).
+
+Com `mode = "yolo"`, use `agent-loop yolo` e passe as tasks na ordem desejada.
+Todas precisam estar rastreadas no commit inicial. `CHANGES_REQUESTED` continua
+voltando ao executor até `APPROVED`; esgotamento de tokens/contexto ou qualquer
+outra falha encerra a sequência. Cada aceite gera um commit local antes da
+próxima task. Ao final, somente o reviewer grava `final-review.md` no state root.
+Não há push, branch auxiliar nem nova chamada ao executor depois desse review.
 
 Para publicar automaticamente uma branch separada:
 
@@ -242,7 +256,7 @@ aceito somente para compatibilidade com profiles e runs anteriores.
 
 ## Estrutura
 
-- `agent-loop`: CLI externa (`run`, `review`, `resume`, `evidence`, `serve`,
+- `agent-loop`: CLI externa (`run`, `yolo`, `review`, `resume`, `evidence`, `serve`,
   `verify`, `integrate`, `systemd-unit`);
 - `scripts/agents/run_task.sh`: ciclo executor → validação → reviewer;
 - `scripts/agents/dx/`: estado, locks, snapshot, adapter congelado, integração e

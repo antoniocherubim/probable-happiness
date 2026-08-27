@@ -8,19 +8,48 @@ task versionada
   → executor (Cursor na implementação atual)
   → validações programáticas
   → reviewer separado (Codex na implementação atual)
-  → CHANGES_REQUESTED retorna ao executor (orçamento inicial de 1 a 5 ciclos)
+  → CHANGES_REQUESTED retorna ao executor (1 a 5 ciclos nos modos comuns;
+    sem limite numérico no modo YOLO)
   → APPROVED técnico vinculado ao conteúdo revisado
   ├─ approval.mode=none → conclusão local
   ├─ approval.mode=telegram → conclusão local + notificação terminal
+  ├─ approval.mode=yolo → commit local + próxima task versionada
+  │  └─ fim da lista → review técnico final em Markdown, sem executor
   └─ approval.mode=github_branch → commit/branch dedicados + push
      → abertura de PR e merge manuais, se desejados
 ```
 
-Não há automação de decisão de produto, criação de task, tag, merge, deploy,
-limpeza ou próxima task. `agent-loop integrate` automatiza somente a integração
-Git local quando explicitamente acionado. O modo opt-in `github_branch` é a
-única exceção remota: publica o snapshot tecnicamente aprovado em branch
-separada, sem abrir PR nem fazer merge.
+Não há automação de decisão de produto, criação de task, tag, merge, deploy ou
+limpeza. `agent-loop integrate` automatiza a integração Git local quando
+explicitamente acionado. A exceção local opt-in é `yolo`, que recebe do operador
+uma lista ordenada de tasks já versionadas, integra cada aceite e inicia a
+seguinte. O modo opt-in `github_branch` é a única exceção remota.
+
+## Sequência YOLO
+
+```toml
+[approval]
+mode = "yolo"
+```
+
+```bash
+./agent-loop yolo --repo /projetos/alvo \
+  docs/tasks/TASK-01.md docs/tasks/TASK-02.md
+```
+
+O preflight exige checkout limpo em uma branch local, `base-ref` igual ao
+`HEAD` e todas as tasks rastreadas no commit inicial. Cada task ainda roda em
+worktree destacado transitório. Em `APPROVED`, o snapshot content-bound é
+verificado e integrado como exatamente um commit local; nenhuma branch de task
+é criada e nenhum remoto é acessado. A task seguinte parte desse novo `HEAD`.
+
+O ciclo `CHANGES_REQUESTED → executor → validações → reviewer` não possui
+limite numérico nesse modo. Timeout, resource limit, validação falha,
+`BLOCKED`, drift, falha de integração ou esgotamento de tokens/contexto de
+qualquer agente encerra a sequência antes da próxima task. Depois do último
+commit, o Codex faz uma revisão cumulativa read-only e grava
+`chains/<sequence>/final-review.md`. Os achados são apenas reportados: o executor
+não é chamado novamente e os commits não são reescritos.
 
 A separação executor/reviewer é arquitetural; o runtime atual ainda está ligado
 a Cursor/Codex como implementações concretas. Veja
@@ -269,6 +298,8 @@ APPROVED
   ├─ mode=none     → verify opcional → integrate explícito/local
   ├─ mode=telegram → enfileira notificação sem ações
   │                   → verify opcional → integrate explícito/local
+  ├─ mode=yolo     → integrate local → próxima task
+  │                   → fim da lista → final-review.md
   └─ mode=github_branch → branch dedicada + push sem force
                            → ações posteriores permanecem manuais
 
@@ -281,9 +312,10 @@ CHANGES_REQUESTED em N = limite
 ```
 
 FIFO/socket/device são recusados no snapshot; artefatos operacionais precisam
-estar ignorados. Nos modos locais, depois do aceite cabe ao operador decidir
+estar ignorados. Em `none` e `telegram`, depois do aceite cabe ao operador decidir
 conscientemente entre descartar, inspecionar/`verify` ou executar
-`agent-loop integrate`. Em `github_branch`, o controller publica o commit
+`agent-loop integrate`. Em `yolo`, essa integração é a autoridade local
+explicitamente concedida ao encadeador. Em `github_branch`, o controller publica o commit
 revisado e o operador decide manualmente qualquer abertura de PR ou merge.
 
 ## Perfil, ambiente e retomada
