@@ -617,8 +617,16 @@ def plan_resume(run_dir: Path, *, review_only: bool = False) -> dict[str, Any]:
             phase = "reviewer"
     elif status == "CHANGES_REQUESTED":
         snapshot = _review_hash(run_dir, iteration)
-        if snapshot and compute_diff_hash(worktree, base) != snapshot:
+        if (
+            snapshot
+            and compute_diff_hash(worktree, base) != snapshot
+            and not review_only
+        ):
             raise RunStateError("worktree changed after CHANGES_REQUESTED review")
+        # ``--review-only`` is an explicit request to review the worktree as it
+        # exists now. The reviewer phase records a fresh pre-review hash before
+        # it starts, so drift from the previous review is expected here rather
+        # than a reason to strand the run.
         phase = "reviewer" if review_only else "executor"
         if not review_only:
             iteration += 1
@@ -627,7 +635,7 @@ def plan_resume(run_dir: Path, *, review_only: bool = False) -> dict[str, Any]:
         review_report = run_dir / f"review-{iteration}.json"
         snapshot = _review_hash(run_dir, iteration)
         current = compute_diff_hash(worktree, base)
-        if snapshot and current != snapshot:
+        if snapshot and current != snapshot and not review_only:
             raise RunStateError("worktree changed during or after interrupted review")
         reviewer_result = run_dir / f"reviewer-{iteration}-result.json"
         if review_only:

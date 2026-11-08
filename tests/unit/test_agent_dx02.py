@@ -529,6 +529,36 @@ def test_resume_plans_executor_reviewer_changes_and_rejects_review_drift(tmp_pat
     (worktree / "tracked.txt").write_text("tampered after snapshot\n", encoding="utf-8")
     with pytest.raises(RunStateError, match="changed"):
         plan_resume(run_dir)
+    refreshed = plan_resume(run_dir, review_only=True)
+    assert refreshed["resume_phase"] == "reviewer"
+    assert refreshed["iteration"] == 1
+
+
+def test_review_only_accepts_manual_changes_after_changes_requested(
+    tmp_path: Path,
+) -> None:
+    _repo, worktree, run_dir, base = make_run(tmp_path)
+    transition_run(run_dir, RunEvent.RUN_STARTED)
+    (run_dir / "cursor-1.json").write_text('{"summary":"ok"}\n', encoding="utf-8")
+    transition_run(run_dir, RunEvent.REVIEW_STARTED)
+    from dx.approval import compute_diff_hash
+
+    snapshot = compute_diff_hash(worktree, base)
+    (run_dir / "review-1-snapshot.json").write_text(
+        json.dumps({"schema_version": 1, "iteration": 1, "diff_hash": snapshot}),
+        encoding="utf-8",
+    )
+    (run_dir / "review-1.json").write_text(
+        '{"status":"CHANGES_REQUESTED"}\n', encoding="utf-8"
+    )
+    transition_run(run_dir, RunEvent.REVIEW_CHANGES_REQUESTED)
+    (worktree / "tracked.txt").write_text("manual correction\n", encoding="utf-8")
+
+    with pytest.raises(RunStateError, match="changed"):
+        plan_resume(run_dir)
+    refreshed = plan_resume(run_dir, review_only=True)
+    assert refreshed["resume_phase"] == "reviewer"
+    assert refreshed["iteration"] == 1
 
 
 def test_resume_waiting_human_reuses_gate_and_rejects_mutation(tmp_path: Path) -> None:
@@ -587,8 +617,22 @@ def test_evidence_accepts_regular_file_and_rejects_unsafe_types(
 
 
 def test_resumed_review_finishes_and_queues_terminal_notification(tmp_path: Path) -> None:
-    _repo, worktree, run_dir, _base = make_run(tmp_path)
+    _repo, worktree, run_dir, base = make_run(tmp_path)
     transition_run(run_dir, RunEvent.RUN_BLOCKED)
+    from dx.approval import compute_diff_hash
+
+    previous_hash = compute_diff_hash(worktree, base)
+    (run_dir / "review-1-snapshot.json").write_text(
+        json.dumps(
+            {"schema_version": 1, "iteration": 1, "diff_hash": previous_hash}
+        ),
+        encoding="utf-8",
+    )
+    (worktree / "tracked.txt").write_text(
+        "manual correction before resumed review\n", encoding="utf-8"
+    )
+    current_hash = compute_diff_hash(worktree, base)
+    assert current_hash != previous_hash
     evidence = tmp_path / "standalone-review.txt"
     evidence.write_text("untrusted supporting evidence\n", encoding="utf-8")
     attach_evidence(run_dir, evidence)
@@ -634,6 +678,10 @@ def test_resumed_review_finishes_and_queues_terminal_notification(tmp_path: Path
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert read_status(run_dir) == STATUS_APPROVED
+    refreshed_snapshot = json.loads(
+        (run_dir / "review-1-snapshot.json").read_text(encoding="utf-8")
+    )
+    assert refreshed_snapshot["diff_hash"] == current_hash
     assert not (run_dir / "human_approval_request.json").exists()
     notify = json.loads((run_dir / "telegram_notify.json").read_text())
     assert notify["kind"] == "approved"

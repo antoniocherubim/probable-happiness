@@ -10,11 +10,9 @@ validação programática, revisão separada e aprovação vinculada ao conteúd
 Depois do aceite técnico, o profile escolhe entre integração local explícita,
 encadeamento local YOLO ou publicação isolada em uma branch dedicada no GitHub.
 
-O projeto nasceu da automação de um workflow pessoal de desenvolvimento. Ele não
-foi originalmente desenhado como experimento acadêmico. A documentação de
-pesquisa adicionada posteriormente separa cuidadosamente **mecanismos já
-implementados**, **observações de uso**, **hipóteses** e **experimentos ainda não
-realizados**.
+O projeto nasceu da automação de um workflow pessoal de desenvolvimento e é
+mantido como ferramenta operacional: o objetivo é executar, revisar, retomar e
+integrar mudanças com limites claros de autoridade.
 
 ## Ideia central
 
@@ -60,14 +58,10 @@ de tasks, sem limite numérico de iterações e sem acesso remoto. Somente o mod
 opt-in `github_branch` possui autoridade remota: ele publica exatamente o
 snapshot revisado em uma branch dedicada; não abre PR, não faz merge nem deploy.
 
-## Estado atual
+## Adapter de controle congelado
 
-A baseline orgânica anterior ao hardening de self-hosting está preservada na
-tag `self-hosting-bootstrap` (`785485f`). A primeira mudança de hardening,
-`SELF-00P`, foi integrada em `bb00503` e introduziu **controlled
-project-adapter evolution**.
-
-No estado pós-`SELF-00P`:
+Para permitir que o harness evolua a própria configuração sem deixar o
+candidato controlar o run corrente:
 
 - profile, instruções e entrypoints relevantes do adapter que controlam um run
   são capturados do commit-base;
@@ -81,11 +75,6 @@ No estado pós-`SELF-00P`:
   plantado no cwd do candidate worktree substitua o módulo do gate;
 - `resume`, `verify` e `integrate` reusam/verificam os bindings de controle
   aplicáveis ao run.
-
-A implementação de `SELF-00P` foi aprovada na terceira iteração. A evidência
-registrada na task inclui uma execução completa de `240 passed` em ambiente com
-`systemd --user`. Esse caso é **ilustrativo**, não uma demonstração estatística
-de superioridade da arquitetura.
 
 ## O que o sistema garante — dentro do modelo de confiança declarado
 
@@ -121,38 +110,9 @@ O harness continua externo ao repositório-alvo. Um projeto consumidor mantém s
 policy local — por exemplo profile, instruções, bootstrap e gates — sem copiar o
 núcleo do loop.
 
-O `artang-platform` é um consumidor real desse modelo: mantém uma camada local
-específica do projeto para dependências de tasks, bootstrap, validações e regras
-arquiteturais, enquanto aponta para a instalação externa do harness. Esse uso é
-tratado como **evidência de reutilização/uso longitudinal**, não como prova de
-melhor confiabilidade.
-
-A arquitetura de adapter ainda está sendo formalizada no roadmap; hoje ela é
-uma fronteira observável na implementação, não um framework genérico de plugins.
-Da mesma forma, os papéis conceituais de executor/reviewer ainda estão ligados a
-Cursor/Codex no runtime atual; a separação entre papel e vendor driver é trabalho
-planejado.
-
-## Pesquisa
-
-O projeto pode servir como artefato para investigar a pergunta:
-
-> **Como permitir que agentes probabilísticos proponham mudanças em software sem
-> conceder-lhes autoridade unilateral sobre quais estados se tornam canônicos?**
-
-A documentação voltada a pesquisa está em:
-
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — arquitetura, trust boundaries,
-  garantias e não-garantias;
-- [`docs/RESEARCH_OVERVIEW.md`](docs/RESEARCH_OVERVIEW.md) — problema, hipóteses,
-  perguntas de pesquisa e evidência já disponível;
-- [`docs/EVALUATION_PLAN.md`](docs/EVALUATION_PLAN.md) — desenho experimental
-  proposto, métricas e ameaças à validade;
-- [`ROADMAP.md`](ROADMAP.md) — hardening e observabilidade planejados.
-
-Não há, neste momento, alegação de novidade acadêmica, ganho causal de
-confiabilidade ou superioridade frente a baselines. Uma revisão bibliográfica
-sistemática e os experimentos comparativos ainda precisam ser realizados.
+Projetos consumidores podem manter dependências de tasks, bootstrap,
+validações e regras arquiteturais no próprio adapter. O núcleo continua ligado a
+Cursor/Codex como implementações concretas dos papéis de executor/reviewer.
 
 ## Preparação
 
@@ -174,9 +134,10 @@ Cursor Agent e Codex CLI autenticados.
 ./agent-loop yolo --repo /caminho/do/projeto \
   docs/tasks/TASK-01.md docs/tasks/TASK-02.md
 ./agent-loop run --repo /caminho/do/projeto --allow-candidate-profile \
-  docs/tasks/SELF-00A.md 3 main
+  docs/tasks/EVOLVE-ADAPTER.md 3 main
 ./agent-loop review --repo /caminho/do/projeto docs/tasks/TASK-01.md
 ./agent-loop resume --run-dir /caminho/externo/para/o/run
+./agent-loop resume --run-dir /caminho/externo/para/o/run --review-only
 ./agent-loop resume --run-dir /caminho/externo/para/o/run --additional-iterations 3
 ./agent-loop evidence --run-dir /caminho/externo/para/o/run --file /tmp/relatorio.txt
 ./agent-loop verify --run-dir /caminho/externo/para/o/run
@@ -207,7 +168,7 @@ ser explícita na criação do run:
   --repo "$PWD" \
   --require-profile \
   --allow-candidate-profile \
-  docs/tasks/SELF-00A.md \
+  docs/tasks/EVOLVE-ADAPTER.md \
   3 \
   HEAD
 ```
@@ -216,6 +177,10 @@ O profile candidato é conteúdo de uma possível próxima versão. O run corren
 continua governado pela visão de controle congelada do commit-base, dentro das
 limitações documentadas em
 [`docs/PROJECT_PROFILE.md`](docs/PROJECT_PROFILE.md).
+
+Quando o operador corrige manualmente o worktree depois de uma revisão
+interrompida ou `CHANGES_REQUESTED`, `resume --review-only` inicia uma nova
+revisão do snapshot atual. A retomada comum continua recusando drift inesperado.
 
 ## Aprovação e publicação
 
@@ -264,12 +229,11 @@ aceito somente para compatibilidade com profiles e runs anteriores.
 - `.agents/reviewer-output.schema.json`: contrato de saída do reviewer;
 - `.agent-loop/project.toml`: profile deste próprio repositório;
 - `tests/unit/`: suíte de regressão;
-- `docs/tasks/`: backlog versionado usado pelo próprio loop;
-- `docs/`: arquitetura, operação e proposta de avaliação.
+- `docs/tasks/`: especificações operacionais versionadas usadas pelo loop;
+- `docs/`: arquitetura e operação.
 
 ## Documentação operacional
 
 - [`docs/AGENT_ORCHESTRATION.md`](docs/AGENT_ORCHESTRATION.md)
 - [`docs/PROJECT_PROFILE.md`](docs/PROJECT_PROFILE.md)
-- [`docs/PERSONAL_CORE_V2.md`](docs/PERSONAL_CORE_V2.md) — registro histórico da
-  linha de implementação anterior ao hardening atual.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)

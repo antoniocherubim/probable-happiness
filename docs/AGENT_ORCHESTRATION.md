@@ -53,8 +53,7 @@ não é chamado novamente e os commits não são reescritos.
 
 A separação executor/reviewer é arquitetural; o runtime atual ainda está ligado
 a Cursor/Codex como implementações concretas. Veja
-[`ARCHITECTURE.md`](ARCHITECTURE.md) para guarantees/non-guarantees e
-[`RESEARCH_OVERVIEW.md`](RESEARCH_OVERVIEW.md) para o enquadramento de pesquisa.
+[`ARCHITECTURE.md`](ARCHITECTURE.md) para garantias e limites operacionais.
 
 ## Pré-requisitos
 
@@ -82,7 +81,7 @@ Executar uma task versionada no `base-ref`:
 ```bash
 ./agent-loop run --repo /projetos/alvo docs/tasks/TASK-01.md 3 main
 ./agent-loop run --repo /projetos/alvo --allow-candidate-profile \
-  docs/tasks/SELF-00A.md 3 main
+  docs/tasks/EVOLVE-ADAPTER.md 3 main
 ```
 
 Revisar mudanças já existentes no checkout atual:
@@ -326,6 +325,11 @@ externo `0600`, timeout por scope `systemd --user`, heartbeat, `agent-loop resum
 e `agent-loop evidence`. Sem `--allow-candidate-profile`, a interface pública de
 `run`/`resume`/`verify`/`integrate` permanece a mesma para consumidores
 externos.
+
+`resume` comum preserva a fase planejada e recusa mudança inesperada depois do
+hash pré-review. Quando o operador alterou o worktree conscientemente,
+`resume --review-only` inicia uma nova revisão do snapshot atual e substitui o
+binding pré-review antes de chamar o reviewer.
 
 ## Limpeza
 

@@ -1,11 +1,10 @@
 # Perfil de projeto e retomada segura
 
 Este documento é o contrato operacional detalhado do profile/adapter. Para a
-visão arquitetural e de pesquisa, veja [`ARCHITECTURE.md`](ARCHITECTURE.md) e
-[`RESEARCH_OVERVIEW.md`](RESEARCH_OVERVIEW.md).
+visão geral dos limites do harness, veja [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-Após `SELF-00P`, é importante distinguir **adapter de controle do run corrente**
-de **adapter candidato proposto para runs futuros**. A autorização de mudança
+O runtime distingue **adapter de controle do run corrente** de **adapter
+candidato proposto para runs futuros**. A autorização de mudança
 não transforma o candidato em controller; ela apenas permite que o conteúdo
 candidato atravesse review/integração se todos os bindings exigidos conferirem.
 
@@ -66,7 +65,7 @@ candidato.
 
 ```bash
 ./agent-loop run --repo /repo --allow-candidate-profile \
-  docs/tasks/SELF-00A.md 3 main
+  docs/tasks/EVOLVE-ADAPTER.md 3 main
 ```
 
 Antes do executor, o run captura do commit-base o profile, as instruções
@@ -174,7 +173,7 @@ Arquivos ignorados, como `.venv/`, podem ser criados ou vinculados.
   --env-file ~/.config/codex-cursor-agent-loop/projects/<repo-id>/test.env \
   docs/tasks/TASK.md 3 main
 ./agent-loop run --repo /repo --allow-candidate-profile \
-  docs/tasks/SELF-00A.md 3 main
+  docs/tasks/EVOLVE-ADAPTER.md 3 main
 ```
 
 Se a flag for omitida e esse arquivo XDG existir, ele é descoberto
@@ -225,7 +224,8 @@ genérico capaz de atribuir um status arbitrário.
 EXECUTING/interrompido  -> executor da mesma iteração
 REVIEWING/interrompido  -> nova revisão do snapshot pré-revisão
 CHANGES_REQUESTED       -> executor da próxima iteração
-BLOCKED + --review-only -> nova revisão do snapshot atual
+EXECUTING/REVIEWING/CHANGES_REQUESTED/BLOCKED + --review-only
+                        -> nova revisão do snapshot atual
 BLOCKED/max_review_iterations + orçamento explícito -> executor em N+1
 AWAITING_HUMAN_APPROVAL -> migra run legado para APPROVED
 HUMAN_APPROVED          -> valida decisão/hash legado
@@ -241,10 +241,12 @@ APPROVED                -> valida manifesto/hash; não repete review
 
 O wrapper mantém `.resume.lock` durante toda a retomada. Antes de iniciar,
 valida metadados, task no base commit, `HEAD`, repositório comum do worktree,
-adapter de controle congelado e hash pré-revisão. Drift durante/depois da revisão
-é recusado. Nos dois modos, `APPROVED` só é terminal com manifesto técnico
-válido. `resume` não aceita `--allow-candidate-profile`; a autorização é a
-gravada na criação do run.
+adapter de controle congelado e os bindings aplicáveis. Na retomada comum,
+drift durante/depois da revisão é recusado. Com `--review-only`, o operador pede
+explicitamente uma nova revisão do estado atual; o runner grava um novo hash
+pré-review e volta a verificar que o reviewer não alterou esse snapshot.
+`APPROVED` continua terminal e exige manifesto técnico válido. `resume` não
+aceita `--allow-candidate-profile`; a autorização é a gravada na criação do run.
 
 ### Orçamento de iterações
 

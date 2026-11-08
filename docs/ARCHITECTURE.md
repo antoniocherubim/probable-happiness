@@ -2,12 +2,8 @@
 
 ## Escopo deste documento
 
-Este documento descreve **o comportamento implementado no estado pós-`SELF-00P`**
-do `probable-happiness`. A baseline anterior ao hardening está preservada na tag
-`self-hosting-bootstrap` (`785485f`); `SELF-00P` foi integrada em `bb00503`.
-
-O objetivo aqui é documentar mecanismos reais e seus limites. Itens do roadmap
-que ainda não foram implementados aparecem explicitamente como planejados.
+Este documento descreve o comportamento operacional implementado no
+`probable-happiness`, seus limites de autoridade e seu modelo de confiança.
 
 ## Problema de engenharia
 
@@ -178,13 +174,13 @@ O objetivo do compare-and-set sob lock é impedir que uma aresta inesperada
 substitua silenciosamente o último estado válido. Isso é um mecanismo local de
 consistência; não é um protocolo distribuído tolerante a processos maliciosos.
 
-## Controlled project-adapter evolution (`SELF-00P`)
+## Evolução controlada do project adapter
 
 Self-hosting criou um problema circular: se o candidate worktree puder trocar
 os arquivos que definem como ele próprio será validado/revisado, a distinção
 entre controller e candidate enfraquece.
 
-`SELF-00P` introduziu uma separação entre:
+O runtime mantém uma separação entre:
 
 ```text
 control adapter for current run
@@ -210,7 +206,7 @@ substitui esse operand pela cópia congelada/validada correspondente em vez de
 executar o script candidato como controller.
 
 A implementação reconhece opções de interpretadores em casos suportados. Para
-`python -m`, `SELF-00P` adicionou `-P` quando necessário para impedir que o
+`python -m`, o runtime adiciona `-P` quando necessário para impedir que o
 módulo nomeado seja sombreado pelo cwd do candidate worktree.
 
 O teste de regressão correspondente planta um `compileall.py` no candidato e
@@ -232,11 +228,9 @@ indireto de código. Entre os limites documentados:
 
 Esses limites são parte do modelo de ameaça, não garantias omitidas.
 
-## Engine N e candidate N+1
+## Controller corrente e candidato futuro
 
-Após `SELF-00P`, já existe um mecanismo concreto para impedir que **parte da
-policy candidata** governe o run atual. O roadmap pretende ampliar e tornar
-explícito o princípio:
+O adapter congelado impede que a policy candidata governe o run atual:
 
 ```text
 Engine N
@@ -244,24 +238,18 @@ Engine N
    └── controls/evaluates ──> candidate Engine N+1
 ```
 
-Durante a construção de N+1, o candidato não deve assumir o papel de controller
-do próprio julgamento.
-
-Importante: a captura completa de **engine provenance**, fail-closed geral em
-**engine drift** e a formalização completa do **stable-controller invariant**
-ainda são tasks planejadas (`PROV-01A`, `PROV-01B`, `SELF-01A`). Não devem ser
-descritas como garantias já implementadas.
+Durante a construção de N+1, o candidato não assume o papel de controller do
+próprio julgamento. As garantias permanecem limitadas aos elementos do adapter
+explicitamente capturados e validados pelo runtime atual.
 
 ## Project adapter e uso externo
 
 Na prática, projetos consumidores já mantêm uma camada específica contendo
 profile, instruções, bootstrap e gates. O núcleo do loop continua externo.
 
-O `artang-platform` é um caso real de consumo: sua integração local cresceu
-para expressar dependências de tasks e gates de domínio sem duplicar o núcleo
-do harness. Isso sustenta a observação de que existe uma fronteira útil entre
-**engine** e **project policy**, mas a interface formal de `Project Adapter`
-ainda é trabalho planejado (`ARCH-01A`).
+Projetos consumidores expressam dependências de tasks e gates de domínio sem
+duplicar o núcleo do harness. O contrato atual do adapter é o profile estrito,
+as instruções, o bootstrap e os gates documentados.
 
 ## Trust boundaries
 
@@ -306,29 +294,11 @@ não bloqueia clientes HTTP genéricos.
 | Aprovação vinculada ao conteúdo revisado | Implementado |
 | Drift pós-review detectado antes da integração | Implementado |
 | Integração local explícita e sem Git remoto | Implementado |
-| Encadeamento YOLO local, linear e sem limite numérico de reviews | Implementado em `YOLO-01` |
-| Review cumulativo final em Markdown sem retorno ao executor | Implementado em `YOLO-01` |
+| Encadeamento YOLO local, linear e sem limite numérico de reviews | Implementado |
+| Review cumulativo final em Markdown sem retorno ao executor | Implementado |
 | Branch dedicada sem PR ou merge no modo `github_branch` | Implementado |
 | Exclusão de comunicação Telegram no modo `github_branch` | Implementado |
-| Adapter de controle congelado para self-hosting/profile evolution | Implementado em `SELF-00P` |
-| Provenance exata da versão do engine em todo run | Planejado |
-| Fail-closed geral ao retomar run com engine diferente | Planejado |
-| Stable-controller invariant completo do engine | Planejado |
-| Export estruturado de dataset de runs | Planejado |
-| Project Adapter formalizado como contrato | Planejado |
-| Executor/reviewer desacoplados de Cursor/Codex | Planejado |
+| Adapter de controle congelado para evolução do profile | Implementado |
 | Verificação formal de correção do software | Não fornecido |
 | Isolamento contra adversário do mesmo UID | Não fornecido |
 | Garantia de que reviewer está correto | Não fornecido |
-
-## Por que isso é interessante para pesquisa
-
-A arquitetura torna explícita uma fronteira entre computação probabilística e
-transições de estado controladas. A hipótese a ser testada não é "dois agentes
-são melhores", mas quais mecanismos — validação programática, review separado,
-binding de conteúdo, isolamento candidato e revalidação — contribuem para
-reduzir mudanças defeituosas ou não intencionais que chegam ao estado canônico,
-e a qual custo.
-
-Veja [`RESEARCH_OVERVIEW.md`](RESEARCH_OVERVIEW.md) e
-[`EVALUATION_PLAN.md`](EVALUATION_PLAN.md).
